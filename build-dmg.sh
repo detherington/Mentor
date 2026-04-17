@@ -34,6 +34,28 @@ ENTITLEMENTS="Mentor/Resources/Mentor.entitlements"
 # Sparkle helper binaries here after first package resolve.
 SPARKLE_BIN="$HOME/Library/Developer/Xcode/DerivedData/Mentor-enurpttqtmadbpguiezgofqmzesv/SourcePackages/artifacts/sparkle/Sparkle/bin"
 
+# ---- Regenerate project from project.yml ----
+# Safety net: project.yml is the source of truth for Info.plist values
+# (bundle version, Sparkle feed URL, etc). If we skip this step and
+# project.yml has been edited since the last xcodegen run, the build
+# will silently use a stale Info.plist — which nuked v1.0.0's first
+# build with a bad SUFeedURL + placeholder SUPublicEDKey.
+if [ -x ".local/bin/xcodegen" ]; then
+    echo "=== Regenerating Xcode project from project.yml ==="
+    .local/bin/xcodegen generate 2>&1 | tail -3
+else
+    echo "WARN: .local/bin/xcodegen not found — Info.plist may be stale."
+    echo "       Run scripts/bootstrap.sh once to build the XcodeGen binary."
+fi
+
+# ---- Preflight: sanity-check Info.plist for unsubstituted placeholders.
+PREFLIGHT_INFO="Mentor/Resources/Info.plist"
+if grep -q "REPLACE_" "$PREFLIGHT_INFO" 2>/dev/null; then
+    echo "ERROR: $PREFLIGHT_INFO still contains REPLACE_ placeholders."
+    echo "       Update project.yml (e.g. SUPublicEDKey) and re-run."
+    exit 1
+fi
+
 # ---- Build ----
 echo "=== Building ${APP_NAME} for Release ==="
 xcodebuild -project Mentor.xcodeproj \
