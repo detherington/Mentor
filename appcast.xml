@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+     xmlns:dc="http://purl.org/dc/elements/1.1/"
+     version="2.0">
+    <channel>
+        <title>Mentor</title>
+        <description>Auto-update feed for Mentor. Each release pushes a new &lt;item&gt; to the top of this file.</description>
+        <language>en</language>
+
+        <!-- Append new release items here, newest first.
+             Emit them with `./build-dmg.sh` and paste the <item> block
+             its output prints. -->
+
+    </channel>
+</rss>

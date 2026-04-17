@@ -1,0 +1,95 @@
+name: Mentor
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  bundleIdPrefix: com.darrell
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+# Sparkle — auto-update framework. Appcast + DMG artifacts live in
+# GitHub Releases for this repo; see README for the release workflow.
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.6.0"
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    ENABLE_HARDENED_RUNTIME: YES
+    # Manual signing with the Developer ID Application cert — keeps TCC
+    # grants stable across rebuilds (ad-hoc signing reshuffles the
+    # CDHash every compile which re-prompts for Screen Recording /
+    # Accessibility / Camera / Mic every time).
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Developer ID Application"
+    DEVELOPMENT_TEAM: "8B29CDK832"
+
+targets:
+  Mentor:
+    type: application
+    platform: macOS
+    sources:
+      - path: Mentor
+        excludes:
+          - "**/*.entitlements"
+          - "Resources/Info.plist"
+    resources:
+      - path: Mentor/Resources/Assets.xcassets
+        optional: true
+    dependencies:
+      - sdk: AVKit.framework
+      - sdk: AVFoundation.framework
+      - sdk: ScreenCaptureKit.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreImage.framework
+      - sdk: Metal.framework
+      - sdk: Carbon.framework
+      - package: Sparkle
+    info:
+      path: Mentor/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Mentor
+        # Bumped on every release. `build-dmg.sh` reads these from
+        # Info.plist and threads them through the appcast entry.
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        LSUIElement: true
+        NSCameraUsageDescription: Mentor records your webcam to overlay it on screen recordings.
+        NSMicrophoneUsageDescription: Mentor records your microphone for narration.
+        LSApplicationCategoryType: public.app-category.video
+        NSHumanReadableCopyright: © 2026 Darrell Etherington
+        # ---- Sparkle auto-update ----------------------------------
+        # Appcast feed hosted via a GitHub raw URL (private-repo-
+        # friendly). Swap to the repo's actual path after `git push`.
+        SUFeedURL: "https://raw.githubusercontent.com/detherington/Mentor/main/appcast.xml"
+        # EdDSA public key for verifying update signatures. Generated
+        # once with Sparkle's `generate_keys`; the private key stays in
+        # the developer's keychain. If you ever rotate, replace this
+        # key + re-sign every live appcast entry at the same time.
+        SUPublicEDKey: "ODjAca9kR1OJ8SuY35WtdhSjO7BM+sPltxEVWNBjqyo="
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        # -----------------------------------------------------------
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Mentor Recording
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - com.darrell.mentor.recording
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.darrell.mentor.recording
+            UTTypeDescription: Mentor Recording
+            UTTypeConformsTo:
+              - com.apple.package
+              - public.composite-content
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - mentor
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.darrell.mentor
+        PRODUCT_NAME: Mentor
+        CODE_SIGN_ENTITLEMENTS: Mentor/Resources/Mentor.entitlements
