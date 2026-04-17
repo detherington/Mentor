@@ -159,7 +159,8 @@ echo ""
 INFO_PLIST="$BUILT_APP/Contents/Info.plist"
 VERSION_SHORT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INFO_PLIST")
 VERSION_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INFO_PLIST")
-DMG_SIZE=$(stat -f%z "$DMG_FINAL")
+# sign_update emits both sparkle:edSignature=… and length=… — no need
+# to read the file size separately here.
 
 echo "=== Sparkle appcast entry ==="
 if [ ! -x "$SPARKLE_BIN/sign_update" ]; then
@@ -184,7 +185,6 @@ else
         <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
         <enclosure
             url="https://github.com/detherington/Mentor/releases/download/v${VERSION_SHORT}/${DMG_FINAL}"
-            length="${DMG_SIZE}"
             type="application/octet-stream"
             ${SIG_OUTPUT} />
     </item>

@@ -11,5 +11,17 @@
              Emit them with `./build-dmg.sh` and paste the <item> block
              its output prints. -->
 
+        <item>
+            <title>Version 1.0.0</title>
+            <pubDate>Fri, 17 Apr 2026 20:00:35 +0000</pubDate>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/detherington/Mentor/releases/download/v1.0.0/Mentor.dmg"
+                type="application/octet-stream"
+                sparkle:edSignature="0kvvuo/uG9FWghsqC+mBIHgOFefOAVJmN5lswWunq34FtIIBnv6wRcapYabTogU3q2A+LRbWL1RatrtDWVZZCQ==" length="2090775" />
+        </item>
+
     </channel>
 </rss>
