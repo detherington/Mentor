@@ -45,6 +45,16 @@ final class CaptureCoordinator: @unchecked Sendable {
     private var currentMetadata: RecordingMetadata?
     private var latestCameraBuffer: CVPixelBuffer?
 
+    // Drop telemetry — tracks how many screen-delegate callbacks fired
+    // and how often the raw writer was nil at that moment (i.e. samples
+    // arrived before startRecording finished wiring up, or after
+    // stopRecording tore down). Printed on stop.
+    private let coordStatsLock = NSLock()
+    private var screenDelegateCalls: Int = 0
+    private var screenDelegateWithNilWriter: Int = 0
+    private var cameraDelegateCalls: Int = 0
+    private var cameraDelegateWithNilWriter: Int = 0
+
     /// Called on the camera queue on every camera frame.
     private let observerLock = NSLock()
     private var _cameraFrameObserver: ((CVPixelBuffer) -> Void)?
@@ -209,6 +219,16 @@ final class CaptureCoordinator: @unchecked Sendable {
 
         await screenCapture.stop()
 
+        coordStatsLock.lock()
+        let stats = (screenDelegateCalls, screenDelegateWithNilWriter,
+                     cameraDelegateCalls, cameraDelegateWithNilWriter)
+        screenDelegateCalls = 0
+        screenDelegateWithNilWriter = 0
+        cameraDelegateCalls = 0
+        cameraDelegateWithNilWriter = 0
+        coordStatsLock.unlock()
+        MentorDebug.log("COORD delegates: screen=\(stats.0) (nilWriter=\(stats.1)) camera=\(stats.2) (nilWriter=\(stats.3))")
+
         // Close the soundboard tap *before* we tear down the rest —
         // stopping synchronises with the engine so by the time the
         // below writers finish, soundboard.m4a is fully flushed.
@@ -323,6 +343,10 @@ extension CaptureCoordinator: ScreenCaptureDelegate {
         pipelineLock.lock()
         let screenRaw = self.screenRawWriter
         pipelineLock.unlock()
+        coordStatsLock.lock()
+        screenDelegateCalls &+= 1
+        if screenRaw == nil { screenDelegateWithNilWriter &+= 1 }
+        coordStatsLock.unlock()
         // Only the raw track is written live — composited output is
         // rebuilt post-capture by FinalRenderer.
         screenRaw?.append(sample)
@@ -347,6 +371,10 @@ extension CaptureCoordinator: CameraCaptureDelegate {
         latestCameraBuffer = imageBuffer
         let webcamRaw = self.webcamRawWriter
         pipelineLock.unlock()
+        coordStatsLock.lock()
+        cameraDelegateCalls &+= 1
+        if webcamRaw == nil { cameraDelegateWithNilWriter &+= 1 }
+        coordStatsLock.unlock()
 
         webcamRaw?.append(sample)
 

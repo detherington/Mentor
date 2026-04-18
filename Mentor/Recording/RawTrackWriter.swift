@@ -21,6 +21,20 @@ final class RawTrackWriter: @unchecked Sendable {
     private var sessionStarted = false
     private var finished = false
 
+    // Drop telemetry — so we can correlate user-visible stutter with
+    // encoder back-pressure. `appendCalls` counts every sample that
+    // landed in `append()`; `dispatched` is what survived the pre-
+    // dispatch readiness check; `encoded` is what actually got to
+    // `input.append()`. `callerDrops` + `queueDrops` are the two silent
+    // drop sinks, split so we know which side is under pressure.
+    private let telemetryLock = NSLock()
+    private var appendCalls: Int = 0
+    private var callerDrops: Int = 0  // dropped before dispatch: input not ready
+    private var dispatched: Int = 0
+    private var queueDrops: Int = 0   // dropped on the write queue: input not ready
+    private var encoded: Int = 0
+    private let label: String
+
     init(
         outputURL: URL,
         pixelSize: CGSize,
@@ -28,6 +42,7 @@ final class RawTrackWriter: @unchecked Sendable {
         expectedFrameRate: Int = 60
     ) throws {
         self.outputURL = outputURL
+        self.label = outputURL.lastPathComponent
         self.writeQueue = DispatchQueue(
             label: "com.darrell.mentor.raw-writer.\(outputURL.lastPathComponent)",
             qos: .userInteractive
@@ -75,10 +90,15 @@ final class RawTrackWriter: @unchecked Sendable {
     /// Called from a capture queue — returns immediately. The actual encode
     /// happens on `writeQueue`.
     func append(_ sampleBuffer: CMSampleBuffer) {
+        telemetryLock.lock(); appendCalls &+= 1; telemetryLock.unlock()
         // Caller-thread back-pressure check: if the encoder is full, drop
         // the sample now rather than queuing it (and holding the underlying
         // pixel buffer in memory, which can exhaust the capture pool).
-        guard input.isReadyForMoreMediaData else { return }
+        guard input.isReadyForMoreMediaData else {
+            telemetryLock.lock(); callerDrops &+= 1; telemetryLock.unlock()
+            return
+        }
+        telemetryLock.lock(); dispatched &+= 1; telemetryLock.unlock()
         writeQueue.async { [sampleBuffer] in
             self.appendOnQueue(sampleBuffer)
         }
@@ -97,8 +117,12 @@ final class RawTrackWriter: @unchecked Sendable {
         // `isReadyForMoreMediaData` provides the backpressure signal —
         // drop samples when the encoder is full rather than letting them
         // pile up on the queue.
-        guard input.isReadyForMoreMediaData else { return }
+        guard input.isReadyForMoreMediaData else {
+            telemetryLock.lock(); queueDrops &+= 1; telemetryLock.unlock()
+            return
+        }
         input.append(sampleBuffer)
+        telemetryLock.lock(); encoded &+= 1; telemetryLock.unlock()
     }
 
     /// Stop writing and finalize the file. Waits for all queued samples to
@@ -115,6 +139,12 @@ final class RawTrackWriter: @unchecked Sendable {
             }
         }
         await writer.finishWriting()
+        telemetryLock.lock()
+        let stats = (appendCalls, callerDrops, dispatched, queueDrops, encoded)
+        telemetryLock.unlock()
+        let total = max(stats.0, 1)
+        let dropPct = Double(stats.1 + stats.3) / Double(total) * 100
+        MentorDebug.log("RAWWRITE[\(label)]: calls=\(stats.0) encoded=\(stats.4) dropped=\(stats.1 + stats.3) (\(String(format: "%.1f%%", dropPct)); caller=\(stats.1), queue=\(stats.3))")
         return writer.status == .completed ? outputURL : nil
     }
 }
