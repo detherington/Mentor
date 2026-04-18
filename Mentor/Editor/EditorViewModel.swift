@@ -49,6 +49,13 @@ final class EditorViewModel {
     /// scrubs to the other end, hits "Cut".
     var selectionStart: CMTime?
 
+    /// ID of the caption line the user most recently targeted via the
+    /// timeline's caption lane. Non-nil values (a) expand the inspector
+    /// caption-edit disclosure, (b) scroll that line's row into view,
+    /// (c) focus its text field. Cleared by other inspector actions
+    /// so selection doesn't linger.
+    var focusedCaptionLineId: UUID?
+
     /// Convenience: normalised range from `selectionStart` to
     /// `currentTime`, or nil if no mark is set. Clamped to the outer
     /// trim so you can't select into already-trimmed regions.
@@ -856,6 +863,67 @@ final class EditorViewModel {
         }
     }
 
+    /// Visible state for the auto-cut button — prevents double-clicks
+    /// while detection is in flight and drives a spinner in the UI.
+    private(set) var isAutoCutting: Bool = false
+
+    /// Published hint: how many cuts the last auto-cut run inserted.
+    /// Nil unless an auto-cut run completed since the editor loaded.
+    /// Cleared when the user manually mutates cuts.
+    private(set) var lastAutoCutCount: Int?
+
+    /// Scan the mic track for interior silences ≥ ~0.8s and insert them
+    /// all as a single undoable batch. Existing cuts are preserved —
+    /// silences are merged into the existing list via `TrimMap`'s
+    /// normaliser, so re-running is idempotent.
+    func autoCutSilences() {
+        guard !isAutoCutting else { return }
+        isAutoCutting = true
+        let audioURL = project.bundle.micAudioURL
+        let dur = duration
+        let outerTrim = trimRange
+        Task { [weak self] in
+            let scan = await SilenceAnalyzer.scan(audioURL: audioURL, duration: dur)
+            await MainActor.run {
+                guard let self else { return }
+                defer { self.isAutoCutting = false }
+                guard let scan else {
+                    self.lastAutoCutCount = 0
+                    return
+                }
+                // Only consider silences strictly inside the user's
+                // current outer trim — detections outside are either
+                // already covered by the outer trim or irrelevant.
+                let candidates = scan.interiorSilences.filter { sil in
+                    CMTimeCompare(sil.start, outerTrim.start) >= 0 &&
+                    CMTimeCompare(sil.end,   outerTrim.end)   <= 0
+                }
+                // Merge with existing cuts via the TrimMap normaliser
+                // (sorts, clamps, merges overlaps). Skip the operation
+                // if nothing new would be added.
+                let existing = self.cutRanges
+                let merged = TrimMap(outerTrim: outerTrim, cuts: existing + candidates).cuts
+                guard merged != existing else {
+                    self.lastAutoCutCount = 0
+                    return
+                }
+                let old = existing
+                self.cutRanges = merged
+                self.applyLayout()
+                self.lastAutoCutCount = merged.count - existing.count
+                self.registerUndoableSnapshot(
+                    "Auto-cut Silences",
+                    capture: { $0.cutRanges },
+                    oldState: old
+                ) { vm, state in
+                    vm.cutRanges = state
+                    vm.applyLayout()
+                }
+                MentorDebug.log("AUTOCUT: inserted \(merged.count - existing.count) silence cuts (\(candidates.count) candidates, \(existing.count) pre-existing)")
+            }
+        }
+    }
+
     /// Re-run silence detection on the mic track and apply the detected
     /// trim. Useful if the user hit "Reset" and now wants the auto-trim
     /// back, or just wants to re-compute after moving files around.
@@ -935,6 +1003,101 @@ final class EditorViewModel {
         transcription = nil
         try? FileManager.default.removeItem(at: project.transcriptionURL)
         applyLayout()
+    }
+
+    // MARK: - Caption line editing
+
+    /// Replace the text of a single caption line. Writes the file back
+    /// and registers an undo step keyed on the line id so multiple
+    /// keystrokes within the coalesce window collapse into one entry
+    /// (feels like a normal text-edit undo instead of one-per-keystroke).
+    func updateCaptionLineText(id: UUID, to newText: String) {
+        guard var log = transcription,
+              let idx = log.lines.firstIndex(where: { $0.id == id }) else { return }
+        let oldLine = log.lines[idx]
+        guard oldLine.text != newText else { return }
+        log.lines[idx].text = newText
+        transcription = log
+        persistTranscription()
+        applyLayout()
+        let capturedID = id
+        registerCoalescedSnapshot(
+            "Edit Caption",
+            coalesceKey: "caption-text-\(capturedID.uuidString)",
+            capture: { vm -> String in
+                vm.transcription?.lines.first(where: { $0.id == capturedID })?.text ?? ""
+            },
+            oldState: oldLine.text
+        ) { vm, state in
+            guard var log = vm.transcription,
+                  let i = log.lines.firstIndex(where: { $0.id == capturedID }) else { return }
+            log.lines[i].text = state
+            vm.transcription = log
+            vm.persistTranscription()
+            vm.applyLayout()
+        }
+    }
+
+    /// Adjust the start/end seconds of a caption line. Both values are
+    /// clamped so start < end with a minimum 100ms length (anything
+    /// shorter flashes too briefly to read).
+    func updateCaptionLineTiming(id: UUID, start: TimeInterval, end: TimeInterval) {
+        guard var log = transcription,
+              let idx = log.lines.firstIndex(where: { $0.id == id }) else { return }
+        let minLen: TimeInterval = 0.1
+        let clampedStart = max(0, start)
+        let clampedEnd = max(clampedStart + minLen, end)
+        let oldLine = log.lines[idx]
+        guard oldLine.startSeconds != clampedStart || oldLine.endSeconds != clampedEnd else { return }
+        log.lines[idx].startSeconds = clampedStart
+        log.lines[idx].endSeconds = clampedEnd
+        transcription = log
+        persistTranscription()
+        applyLayout()
+        let capturedID = id
+        let oldPair = (oldLine.startSeconds, oldLine.endSeconds)
+        registerCoalescedSnapshot(
+            "Adjust Caption Timing",
+            coalesceKey: "caption-timing-\(capturedID.uuidString)",
+            capture: { vm -> (TimeInterval, TimeInterval) in
+                if let l = vm.transcription?.lines.first(where: { $0.id == capturedID }) {
+                    return (l.startSeconds, l.endSeconds)
+                }
+                return (0, 0)
+            },
+            oldState: oldPair
+        ) { vm, state in
+            guard var log = vm.transcription,
+                  let i = log.lines.firstIndex(where: { $0.id == capturedID }) else { return }
+            log.lines[i].startSeconds = state.0
+            log.lines[i].endSeconds = state.1
+            vm.transcription = log
+            vm.persistTranscription()
+            vm.applyLayout()
+        }
+    }
+
+    /// Remove a single caption line. Undoable; the full pre-delete
+    /// `lines` array is snapshotted so restore preserves order.
+    func deleteCaptionLine(id: UUID) {
+        guard var log = transcription,
+              let idx = log.lines.firstIndex(where: { $0.id == id }) else { return }
+        let preDelete = log.lines
+        log.lines.remove(at: idx)
+        transcription = log
+        persistTranscription()
+        applyLayout()
+        registerUndoableSnapshot(
+            "Delete Caption",
+            capture: { vm -> [TranscriptionLine] in vm.transcription?.lines ?? [] },
+            oldState: preDelete
+        ) { vm, state in
+            guard var l = vm.transcription else { return }
+            l.lines = state
+            vm.transcription = l
+            vm.persistTranscription()
+            vm.applyLayout()
+        }
     }
 
     private func persistTranscription() {

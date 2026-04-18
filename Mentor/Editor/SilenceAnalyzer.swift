@@ -41,7 +41,30 @@ enum SilenceAnalyzer {
         /// two audible phrases.
         var minRisingEdges: Int = 3
 
+        /// Minimum interior silence length to propose as a cut. Default
+        /// 0.8s is long enough to skip "thinking pauses" and "ok so…"
+        /// stalls without touching natural breath gaps between phrases
+        /// (which are typically <0.5s). Bumped up to 1.2s+ for more
+        /// conservative trimming.
+        var interiorMinSilenceSeconds: Double = 0.8
+        /// Pad kept INSIDE each detected silence on both sides so the
+        /// cut doesn't clip the tail of the previous word or the
+        /// attack of the next. At 0.15s each side, a 0.8s detected
+        /// silence becomes a 0.5s cut.
+        var interiorEndpointPadSeconds: Double = 0.15
+
         static let `default` = Config()
+    }
+
+    /// Richer result returned by `scan(...)`: the outer content range
+    /// (same as the old `detectContentRange`) plus any long interior
+    /// silences that are candidates for auto-jumpcut.
+    struct Scan {
+        let contentRange: CMTimeRange
+        /// Interior silences, in source-time, already clamped to sit
+        /// strictly inside `contentRange` and padded inwards by
+        /// `interiorEndpointPadSeconds`. Sorted by start time.
+        let interiorSilences: [CMTimeRange]
     }
 
     /// Detect the content range within `audioURL`. Returns nil if the
@@ -52,6 +75,19 @@ enum SilenceAnalyzer {
         duration: CMTime,
         config: Config = .default
     ) async -> CMTimeRange? {
+        await scan(audioURL: audioURL, duration: duration, config: config)?.contentRange
+    }
+
+    /// Full silence scan — returns both the outer content range (for
+    /// auto-trim) and the list of interior silent regions (for
+    /// auto-jumpcut). Single pass over the audio, so callers that want
+    /// both should use this rather than calling `detectContentRange`
+    /// twice.
+    static func scan(
+        audioURL: URL,
+        duration: CMTime,
+        config: Config = .default
+    ) async -> Scan? {
         guard FileManager.default.fileExists(atPath: audioURL.path) else {
             return nil
         }
@@ -66,7 +102,7 @@ enum SilenceAnalyzer {
         audioURL: URL,
         duration: CMTime,
         config: Config
-    ) -> CMTimeRange? {
+    ) -> Scan? {
         let file: AVAudioFile
         do {
             file = try AVAudioFile(forReading: audioURL)
@@ -94,6 +130,14 @@ enum SilenceAnalyzer {
         var wasActive = false
         var cursor: AVAudioFramePosition = 0
 
+        // Interior silence tracking. We record [start, end) of each
+        // silent run that begins AFTER the first active window — leading
+        // silence is handled by the outer trim. Silences still open at
+        // EOF are discarded because they're tail silence (ditto).
+        var silenceRuns: [(start: AVAudioFramePosition, end: AVAudioFramePosition)] = []
+        var currentSilenceStart: AVAudioFramePosition?
+        let minSilenceFrames = AVAudioFramePosition(config.interiorMinSilenceSeconds * sampleRate)
+
         while cursor < totalFrames {
             let remaining = totalFrames - cursor
             let framesToRead = AVAudioFrameCount(min(AVAudioFramePosition(windowFrames), remaining))
@@ -115,6 +159,21 @@ enum SilenceAnalyzer {
                 lastActiveFrame = cursor + AVAudioFramePosition(read)
                 if !wasActive {
                     risingEdges += 1
+                    // Close the silent run (if we were inside one and
+                    // had at least one prior active window).
+                    if let s = currentSilenceStart {
+                        let runLen = cursor - s
+                        if runLen >= minSilenceFrames {
+                            silenceRuns.append((start: s, end: cursor))
+                        }
+                        currentSilenceStart = nil
+                    }
+                }
+            } else {
+                // Silent window. Start a new silent run only if we've
+                // already seen speech — leading silence is outer trim.
+                if firstActiveFrame != nil, currentSilenceStart == nil {
+                    currentSilenceStart = cursor
                 }
             }
             wasActive = isActive
@@ -140,10 +199,36 @@ enum SilenceAnalyzer {
             return nil
         }
 
-        return CMTimeRange(
+        let contentRange = CMTimeRange(
             start: CMTime(seconds: startSec, preferredTimescale: 600),
             end:   CMTime(seconds: endSec,   preferredTimescale: 600)
         )
+
+        // Convert each silence run to a padded CMTimeRange. The padding
+        // keeps `interiorEndpointPadSeconds` of audio before and after
+        // each cut so speech tails/attacks aren't clipped — e.g. a raw
+        // 0.8s silence becomes a 0.5s cut with 0.15s buffer each side.
+        let pad = config.interiorEndpointPadSeconds
+        let interiorSilences: [CMTimeRange] = silenceRuns.compactMap { run in
+            let rawStart = Double(run.start) / sampleRate
+            let rawEnd   = Double(run.end) / sampleRate
+            let padStart = rawStart + pad
+            let padEnd   = rawEnd - pad
+            // Drop if padding collapses the cut to nothing.
+            guard padEnd - padStart >= 0.1 else { return nil }
+            // Clamp inside the content range so we don't cut into outer
+            // trim regions (the outer trim already handles those).
+            guard padStart >= CMTimeGetSeconds(contentRange.start),
+                  padEnd   <= CMTimeGetSeconds(contentRange.end) else {
+                return nil
+            }
+            return CMTimeRange(
+                start: CMTime(seconds: padStart, preferredTimescale: 600),
+                end:   CMTime(seconds: padEnd,   preferredTimescale: 600)
+            )
+        }
+
+        return Scan(contentRange: contentRange, interiorSilences: interiorSilences)
     }
 
     /// RMS across all channels of a PCM buffer. Handles float32,

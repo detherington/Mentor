@@ -28,6 +28,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastKnownCameraDeviceID: String?
     private var lastKnownMicDeviceID: String?
 
+    /// URLs received via `application(_:open:)` during launch — before
+    /// the other controllers are wired up. Drained either after
+    /// `applicationDidFinishLaunching` finishes wiring (normal case) or
+    /// forwarded to an already-running instance before we self-terminate
+    /// (duplicate case).
+    private var pendingOpenURLs: [URL] = []
+
     nonisolated static func main() {
         MainActor.assumeIsolated {
             let app = NSApplication.shared
@@ -41,7 +48,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // main menu so those work — the menu visually appears at the
             // top of the screen whenever any of our windows is focused.
             app.mainMenu = Self.buildMainMenu()
+
+            // Install a raw `kAEOpenDocuments` handler in addition to
+            // `application(_:open:)`. On LSUIElement apps the high-level
+            // delegate method sometimes doesn't fire before the runloop
+            // reaches `applicationDidFinishLaunching` — but the raw
+            // Apple Event is delivered synchronously whenever it's
+            // dispatched, giving us a reliable channel that populates
+            // `pendingOpenURLs` in time for the duplicate check.
+            NSAppleEventManager.shared().setEventHandler(
+                delegate,
+                andSelector: #selector(handleOpenDocumentsEvent(_:withReplyEvent:)),
+                forEventClass: AEEventClass(kCoreEventClass),
+                andEventID: AEEventID(kAEOpenDocuments)
+            )
+
             app.run()
+        }
+    }
+
+    /// Low-level handler for the `kAEOpenDocuments` Apple Event. Parses
+    /// the `keyDirectObject` as a list of alias / URL descriptors and
+    /// feeds them through the same `pendingOpenURLs` buffer that the
+    /// higher-level `application(_:open:)` uses. Either path is
+    /// sufficient — they cross-populate into the same buffer.
+    @MainActor
+    @objc
+    func handleOpenDocumentsEvent(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let listDescriptor = event.paramDescriptor(forKeyword: keyDirectObject) else {
+            return
+        }
+        var urls: [URL] = []
+        for i in 1...max(listDescriptor.numberOfItems, 0) {
+            guard let item = listDescriptor.atIndex(i) else { continue }
+            // URL-shaped descriptors come in as `typeFileURL`; older
+            // senders may use `typeAlias`. Try both.
+            if let urlString = item.stringValue, let url = URL(string: urlString) {
+                urls.append(url)
+                continue
+            }
+            if let data = item.coerce(toDescriptorType: typeFileURL)?.data,
+               let s = String(data: data, encoding: .utf8),
+               let url = URL(string: s) {
+                urls.append(url)
+            }
+        }
+        guard !urls.isEmpty else { return }
+        MentorDebug.log("APP: handleOpenDocumentsEvent captured \(urls.count) URL(s); menuBar=\(menuBar == nil ? "nil" : "ready")")
+        if menuBar == nil {
+            pendingOpenURLs.append(contentsOf: urls)
+        } else {
+            for url in urls { openEditor(for: url) }
         }
     }
 
@@ -130,6 +187,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Drain any queued Apple Events (specifically `kAEOpenDocuments`)
+        // before running the duplicate-instance check. When Finder
+        // double-clicks a .mentor file, macOS launches us with the file
+        // to open — but the open URL is delivered via an Apple Event
+        // that's queued on the main runloop. Without pumping the
+        // runloop, `applicationDidFinishLaunching` executes before the
+        // Apple Event gets dispatched to `application(_:open:)`, so
+        // `pendingOpenURLs` is empty when we reach the duplicate check
+        // below and we terminate without ever forwarding the URL.
+        //
+        // A 50ms pump is enough: Apple Events emitted at launch are
+        // in-queue by the time we get here, so they dispatch on the
+        // first runloop iteration. If nothing's queued we return
+        // immediately.
+        _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+
         // Bail if another Mentor is already running (e.g. you launched a
         // fresh build from Xcode while a previous one is still pinned to
         // the menu bar). Two menu bar items + two competing capture
@@ -140,10 +213,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // because they intend to kill the older one anyway, so we just
         // surface a console hint.
         if let other = Self.otherMentorInstance() {
-            MentorDebug.log("APP: another Mentor instance is running (pid=\(other.processIdentifier)); quitting this one. Activate or quit the other from the menu bar.")
-            // Bring the other instance forward so the user can see it
-            // got the focus.
-            other.activate(options: [])
+            MentorDebug.log("APP: another Mentor instance is running (pid=\(other.processIdentifier)); forwarding \(pendingOpenURLs.count) pending URLs + quitting.")
+            // Forward any .mentor URLs that Finder handed us on launch
+            // so the already-running instance opens them — otherwise a
+            // double-click would spawn us, we'd terminate as a duplicate,
+            // and nothing would end up opening.
+            if !pendingOpenURLs.isEmpty, let bundleURL = other.bundleURL {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                config.addsToRecentItems = false
+                for url in pendingOpenURLs {
+                    NSWorkspace.shared.open(
+                        [url],
+                        withApplicationAt: bundleURL,
+                        configuration: config,
+                        completionHandler: nil
+                    )
+                }
+                pendingOpenURLs.removeAll()
+            } else {
+                // No URLs to forward — just bring the other instance
+                // forward so the user sees which one remains.
+                other.activate(options: [])
+            }
             NSApp.terminate(nil)
             return
         }
@@ -199,6 +291,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await self.startCameraSessionWithPermissions()
             self.refreshWebcamPreview()
             self.checkAccessibilityPermission()
+        }
+
+        // Drain any URLs that `application(_:open:)` buffered during
+        // launch (i.e. the user double-clicked a .mentor and Finder
+        // handed us the file before our controllers existed).
+        if !pendingOpenURLs.isEmpty {
+            MentorDebug.log("APP: draining \(pendingOpenURLs.count) pending open URL(s)")
+            let urls = pendingOpenURLs
+            pendingOpenURLs.removeAll()
+            for url in urls {
+                openEditor(for: url)
+            }
         }
     }
 
@@ -397,6 +501,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Editor
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        MentorDebug.log("APP: application(_:open:) fired with \(urls.count) URL(s); menuBar=\(menuBar == nil ? "nil" : "ready")")
+        // This callback fires during launch — specifically BEFORE
+        // `applicationDidFinishLaunching` completes — when the user
+        // double-clicks a .mentor file in Finder and we're not yet
+        // running. At that point `menuBar`/`coordinator`/`editorWindows`
+        // are all nil, so calling `openEditor` now would crash.
+        //
+        // If we're not wired up yet, buffer the URLs and drain them
+        // after `applicationDidFinishLaunching` decides whether to keep
+        // running (normal case) or self-terminate + forward to the
+        // pre-existing instance (duplicate case).
+        if menuBar == nil {
+            pendingOpenURLs.append(contentsOf: urls)
+            return
+        }
         for url in urls {
             openEditor(for: url)
         }

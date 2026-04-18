@@ -81,26 +81,54 @@ struct EditorView: View {
         // jump-forward, arrows step one frame, shift-arrows step one
         // second. Using `.onKeyPress` so these fire whenever the window
         // has key focus without needing hidden buttons per mapping.
-        .onKeyPress(.leftArrow) { vm.stepFrame(forward: false); return .handled }
-        .onKeyPress(.rightArrow) { vm.stepFrame(forward: true);  return .handled }
-        .onKeyPress(keys: ["j"]) { _ in vm.stepFiveSeconds(forward: false); return .handled }
-        .onKeyPress(keys: ["k"]) { _ in vm.pausePlayback();                 return .handled }
-        .onKeyPress(keys: ["l"]) { _ in vm.stepFiveSeconds(forward: true);  return .handled }
+        //
+        // IMPORTANT: SwiftUI's `.onKeyPress` on a parent fires even when
+        // a descendant `TextField` has focus. For the character-key
+        // shortcuts (J/K/L, and the unshifted variants inside the
+        // "phases: .down" block) we guard with `isTextInputFocused()`
+        // so typing a letter in a caption field doesn't also jump the
+        // timeline. Arrows and ⌘Z are left alone — arrows move the
+        // cursor inside the field naturally (their `.handled` still
+        // prevents the editor shortcut at field-focus time because
+        // TextField consumes arrows first via the responder chain;
+        // testing on macOS 26 confirms no duplicate handling).
+        .onKeyPress(.leftArrow) {
+            if isTextInputFocused() { return .ignored }
+            vm.stepFrame(forward: false); return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            if isTextInputFocused() { return .ignored }
+            vm.stepFrame(forward: true);  return .handled
+        }
+        .onKeyPress(keys: ["j"]) { _ in
+            if isTextInputFocused() { return .ignored }
+            vm.stepFiveSeconds(forward: false); return .handled
+        }
+        .onKeyPress(keys: ["k"]) { _ in
+            if isTextInputFocused() { return .ignored }
+            vm.pausePlayback(); return .handled
+        }
+        .onKeyPress(keys: ["l"]) { _ in
+            if isTextInputFocused() { return .ignored }
+            vm.stepFiveSeconds(forward: true);  return .handled
+        }
         .onKeyPress(phases: .down) { press in
             // Shift+arrow = 1s step. SwiftUI's `.onKeyPress(.leftArrow)`
             // above fires for unmodified arrows; this catches the shifted
-            // variants.
+            // variants. Skip when a text field is focused so ⇧← / ⇧→
+            // for word-selection inside the field still work.
             if press.modifiers.contains(.shift) && !press.modifiers.contains(.command) {
+                if isTextInputFocused() { return .ignored }
                 switch press.key {
                 case .leftArrow:  vm.stepSecond(forward: false); return .handled
                 case .rightArrow: vm.stepSecond(forward: true);  return .handled
                 default: break
                 }
             }
-            // ⌘Z / ⌘⇧Z — undo/redo. Handled here (rather than via a
-            // hidden button with `.keyboardShortcut`) because the app is
-            // `LSUIElement`, so there's no main menu bar to route an
-            // Edit → Undo menu item through the responder chain.
+            // ⌘Z / ⌘⇧Z — undo/redo. Deliberately fires regardless of
+            // text field focus: macOS users expect ⌘Z to undo app-level
+            // state even while editing a field. The text field's own
+            // undo is separate (field editor).
             if press.modifiers.contains(.command),
                press.characters.lowercased() == "z" {
                 if press.modifiers.contains(.shift) {
@@ -110,15 +138,16 @@ struct EditorView: View {
                 }
                 return .handled
             }
-            // Esc — drop any in-progress range selection.
+            // Esc — drop any in-progress range selection. Still fine in
+            // text field focus — Esc doesn't cancel typing.
             if press.key == .escape, vm.selectionRange != nil {
                 vm.clearSelection()
                 return .handled
             }
-            // ⌫ — when a selection is active, cut it. Otherwise fall
-            // through so other delete handlers (e.g. on focused
-            // keyframe rows) still work.
+            // ⌫ — when a selection is active, cut it. Skip if text
+            // field is focused so delete-a-character still works.
             if press.key == .delete || press.key == .deleteForward {
+                if isTextInputFocused() { return .ignored }
                 if vm.selectionRange != nil {
                     vm.cutSelection()
                     return .handled
@@ -128,6 +157,20 @@ struct EditorView: View {
         }
     }
 
+    /// True if the key window's first responder is a text input field
+    /// (TextField, SecureField, TextEditor). Used to gate editor
+    /// keyboard shortcuts so they don't swallow plain letter keys while
+    /// the user is editing a caption line.
+    private func isTextInputFocused() -> Bool {
+        guard let window = NSApp.keyWindow else { return false }
+        let responder = window.firstResponder
+        // SwiftUI's TextField renders as an NSTextField, whose editing
+        // responder is an NSTextView (the shared field editor).
+        if responder is NSTextView { return true }
+        if responder is NSTextField { return true }
+        return false
+    }
+
     // MARK: - Timeline
 
     @ViewBuilder
@@ -135,7 +178,7 @@ struct EditorView: View {
         TimelineView(viewModel: vm)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .frame(height: 192)
+            .frame(height: 212)
     }
 
     // MARK: - Inspector
@@ -144,8 +187,9 @@ struct EditorView: View {
     private func inspector(vm: EditorViewModel) -> some View {
         @Bindable var vm = vm
 
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Recording").font(.headline)
                     LabeledRow("Captured", value: vm.project.metadata.startDate.formatted(
@@ -261,8 +305,21 @@ struct EditorView: View {
                 Text("Renders a new MP4 with the webcam layout above baked in. Original bundle is untouched.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                }
+                .padding()
             }
-            .padding()
+            // Timeline caption-pill taps set `focusedCaptionLineId`;
+            // scroll this pane so the matching row is on screen. Runs
+            // on the next layout pass so the DisclosureGroup inside
+            // CaptionEditList has time to expand first.
+            .onChange(of: vm.focusedCaptionLineId) { _, newValue in
+                guard let id = newValue else { return }
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                }
+            }
         }
     }
 
@@ -496,6 +553,11 @@ struct EditorView: View {
                     .controlSize(.small)
                     .disabled(vm.isTranscribing)
                 }
+
+                // Per-line edit list. Collapsed by default — most
+                // transcriptions are a dozen-plus lines and an always-
+                // open list would dwarf every other inspector section.
+                CaptionEditList(vm: vm, lines: log.lines)
             } else {
                 Text("Transcribe your narration on-device to burn subtitles into the exported MP4. First run prompts for Speech Recognition permission.")
                     .font(.caption)
@@ -545,6 +607,9 @@ struct EditorView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Cuts").font(.headline)
+                if vm.isAutoCutting {
+                    ProgressView().controlSize(.small)
+                }
                 Spacer()
                 if !vm.cutRanges.isEmpty {
                     Button(role: .destructive) {
@@ -556,8 +621,27 @@ struct EditorView: View {
                 }
             }
 
+            HStack(spacing: 6) {
+                Button {
+                    vm.autoCutSilences()
+                } label: {
+                    Label("Auto-cut silences", systemImage: "waveform.slash")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.small)
+                .disabled(vm.isAutoCutting)
+                .help("Scan the mic track and ripple-delete every pause longer than ~0.8 seconds. Leaves 0.15s buffer on each side so speech tails aren't clipped.")
+            }
+            if let n = vm.lastAutoCutCount {
+                Text(n == 0
+                     ? "No cut-worthy silences found."
+                     : "Auto-cut added \(n) silence cut\(n == 1 ? "" : "s").")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             if vm.cutRanges.isEmpty {
-                Text("Select a range on the timeline (⇧I to mark start, scrub, ⇧O to cut) to ripple-delete a section from the output. Keyframes + captions shift to cover the gap.")
+                Text("Select a range on the timeline (⇧I to mark start, scrub, ⇧O to cut) to ripple-delete a section from the output. Or hit Auto-cut silences above to strip long pauses automatically. Keyframes + captions shift to cover each gap.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -988,7 +1072,45 @@ private struct TimelineView: View {
             }
             .frame(height: 14)
 
+            GeometryReader { geo in
+                captionsLane(width: geo.size.width)
+            }
+            .frame(height: 14)
+
             controls
+        }
+    }
+
+    // MARK: Caption lane
+
+    @ViewBuilder
+    private func captionsLane(width: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.secondary.opacity(0.06))
+
+            ForEach(viewModel.transcription?.lines ?? []) { line in
+                let startTime = CMTime(seconds: line.startSeconds, preferredTimescale: 600)
+                let endTime = CMTime(seconds: line.endSeconds, preferredTimescale: 600)
+                let a = xForTime(startTime, width: width)
+                let b = xForTime(endTime, width: width)
+                // Range pill — width matches the line's display duration,
+                // collapsed to a minimum 3pt so very short lines stay
+                // clickable. Fill colour flips to accent when this line
+                // is the focused one, so after clicking the pill you can
+                // see which row the inspector jumped to.
+                let isFocused = viewModel.focusedCaptionLineId == line.id
+                let w = max(3, b - a)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(isFocused ? Color.accentColor.opacity(0.9) : Color.blue.opacity(0.6))
+                    .frame(width: w, height: 10)
+                    .offset(x: max(0, min(width - w, a)))
+                    .help("\(timeString(startTime)): \(line.text)")
+                    .onTapGesture {
+                        viewModel.seek(to: startTime)
+                        viewModel.focusedCaptionLineId = line.id
+                    }
+            }
         }
     }
 
@@ -1642,5 +1764,220 @@ private struct ExportSheet: View {
             return "Export cancelled"
         }
         return "Export failed"
+    }
+}
+
+// MARK: - Caption edit list
+
+/// Expandable inline editor for the full transcription. Shown inside
+/// the Captions inspector section when a transcription exists. Lifted
+/// to its own `View` struct so it can own the `@State` for expansion +
+/// per-row text-field buffers without forcing the enclosing editor to
+/// re-render the entire inspector on every keystroke.
+///
+/// Row layout: one horizontal row per line — timestamp pill (click to
+/// jump playhead), editable text field, "set-to-playhead" buttons for
+/// start/end, trash. Text edits + timing nudges route through the
+/// viewModel's coalesced-undo helpers so a burst of edits collapses to
+/// one undo entry.
+private struct CaptionEditList: View {
+    let vm: EditorViewModel
+    let lines: [TranscriptionLine]
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(spacing: 4) {
+                ForEach(lines) { line in
+                    CaptionEditRow(vm: vm, line: line)
+                        .id(line.id)
+                }
+            }
+            .padding(.top, 4)
+        } label: {
+            HStack {
+                Text("Edit lines").font(.subheadline.weight(.medium))
+                Text("\(lines.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        // Expand automatically when a timeline caption pill is tapped
+        // — the inspector's ScrollViewReader scrolls to the row, but
+        // the row is useless if this disclosure is still collapsed.
+        .onChange(of: vm.focusedCaptionLineId) { _, newValue in
+            if newValue != nil && !isExpanded {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded = true
+                }
+            }
+        }
+    }
+}
+
+private struct CaptionEditRow: View {
+    let vm: EditorViewModel
+    let line: TranscriptionLine
+
+    // Local buffer so typing feels immediate — we push to the view
+    // model onChange but don't round-trip through the persisted log on
+    // every keystroke. Seeded fresh each time `line.text` changes from
+    // outside (undo/redo, regeneration, etc).
+    @State private var textBuffer: String = ""
+    @State private var seeded: Bool = false
+
+    /// Focus driver — SwiftUI fills the field editor automatically when
+    /// this flips true, scrolling into view and selecting all text.
+    /// Triggered by a timeline pill click via `focusedCaptionLineId`.
+    @FocusState private var isTextFocused: Bool
+
+    var body: some View {
+        // Slight accent tint when this row is the one the user just
+        // clicked on in the timeline lane — helps correlate which pill
+        // → which row at a glance.
+        let isFocused = vm.focusedCaptionLineId == line.id
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Button {
+                    vm.seek(to: CMTime(seconds: line.startSeconds, preferredTimescale: 600))
+                } label: {
+                    Text(timestampString(line.startSeconds))
+                        .font(.caption2.monospacedDigit())
+                }
+                .buttonStyle(.plain)
+                .help("Jump playhead to this caption's start")
+
+                TextField("caption text", text: $textBuffer)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .focused($isTextFocused)
+                    .onChange(of: textBuffer) { _, new in
+                        // Skip the initial seed write so undo stays clean.
+                        guard seeded, new != line.text else { return }
+                        vm.updateCaptionLineText(id: line.id, to: new)
+                    }
+
+                Button(role: .destructive) {
+                    vm.deleteCaptionLine(id: line.id)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .help("Delete this caption line")
+            }
+            HStack(spacing: 6) {
+                Text("Start")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                secondsField(
+                    value: line.startSeconds,
+                    commit: { newStart in
+                        vm.updateCaptionLineTiming(id: line.id, start: newStart, end: line.endSeconds)
+                    }
+                )
+                Button {
+                    vm.updateCaptionLineTiming(
+                        id: line.id,
+                        start: CMTimeGetSeconds(vm.currentTime),
+                        end: line.endSeconds
+                    )
+                } label: {
+                    Image(systemName: "arrow.down.to.line.compact")
+                }
+                .buttonStyle(.plain)
+                .help("Snap start to playhead")
+
+                Text("End")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                secondsField(
+                    value: line.endSeconds,
+                    commit: { newEnd in
+                        vm.updateCaptionLineTiming(id: line.id, start: line.startSeconds, end: newEnd)
+                    }
+                )
+                Button {
+                    vm.updateCaptionLineTiming(
+                        id: line.id,
+                        start: line.startSeconds,
+                        end: CMTimeGetSeconds(vm.currentTime)
+                    )
+                } label: {
+                    Image(systemName: "arrow.up.to.line.compact")
+                }
+                .buttonStyle(.plain)
+                .help("Snap end to playhead")
+
+                Spacer()
+            }
+            .font(.caption2.monospacedDigit())
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(
+            (isFocused ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.05)),
+            in: RoundedRectangle(cornerRadius: 5)
+        )
+        .onAppear {
+            // Seed the text buffer on first appearance and whenever the
+            // backing line's text shifts from outside this row (undo).
+            if !seeded || textBuffer != line.text {
+                textBuffer = line.text
+                seeded = true
+            }
+            // If the app just launched with a pre-existing focused id
+            // matching this row, grab focus on appearance. The onChange
+            // below handles the normal "user clicks a pill" path.
+            if isFocused { isTextFocused = true }
+        }
+        .onChange(of: line.text) { _, new in
+            if textBuffer != new {
+                textBuffer = new
+            }
+        }
+        .onChange(of: vm.focusedCaptionLineId) { _, newValue in
+            // Only this row's matching id should take focus — avoids a
+            // broadcast that would make every row grab focus on every
+            // change (and thrash the field editor).
+            if newValue == line.id {
+                // Defer so the DisclosureGroup has finished animating
+                // open and the TextField is actually attached.
+                DispatchQueue.main.async {
+                    isTextFocused = true
+                }
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    @ViewBuilder
+    private func secondsField(
+        value: TimeInterval,
+        commit: @escaping (TimeInterval) -> Void
+    ) -> some View {
+        TextField(
+            "",
+            value: Binding<TimeInterval>(
+                get: { value },
+                set: { commit($0) }
+            ),
+            format: .number.precision(.fractionLength(2))
+        )
+        .textFieldStyle(.roundedBorder)
+        .controlSize(.small)
+        .frame(width: 58)
+        .multilineTextAlignment(.trailing)
+    }
+
+    private func timestampString(_ s: TimeInterval) -> String {
+        guard s.isFinite else { return "--:--.-" }
+        let totalMs = Int(max(0, s) * 10)
+        let tenths = totalMs % 10
+        let totalSec = totalMs / 10
+        let m = totalSec / 60
+        let sec = totalSec % 60
+        return String(format: "%02d:%02d.%d", m, sec, tenths)
     }
 }
