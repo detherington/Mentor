@@ -43,18 +43,46 @@ final class EditorViewModel {
     // Editable overlay parameters. `didSet` writes through to the compositor's
     // shared state and nudges the player to redraw if paused.
     var webcamPosition: WebcamPosition {
-        didSet { if oldValue != webcamPosition { applyLayout() } }
+        didSet {
+            if oldValue != webcamPosition {
+                applyLayout()
+                registerUndoableChange(\.webcamPosition, from: oldValue,
+                                       actionName: "Change Webcam Position",
+                                       coalesceKey: "webcamPosition")
+            }
+        }
     }
     var webcamShape: WebcamShape {
-        didSet { if oldValue != webcamShape { applyLayout() } }
+        didSet {
+            if oldValue != webcamShape {
+                applyLayout()
+                registerUndoableChange(\.webcamShape, from: oldValue,
+                                       actionName: "Change Webcam Shape",
+                                       coalesceKey: "webcamShape")
+            }
+        }
     }
     /// In output pixels.
     var webcamDiameter: CGFloat {
-        didSet { if oldValue != webcamDiameter { applyLayout() } }
+        didSet {
+            if oldValue != webcamDiameter {
+                applyLayout()
+                registerUndoableChange(\.webcamDiameter, from: oldValue,
+                                       actionName: "Change Webcam Size",
+                                       coalesceKey: "webcamDiameter")
+            }
+        }
     }
     /// In output pixels.
     var webcamInset: CGFloat {
-        didSet { if oldValue != webcamInset { applyLayout() } }
+        didSet {
+            if oldValue != webcamInset {
+                applyLayout()
+                registerUndoableChange(\.webcamInset, from: oldValue,
+                                       actionName: "Change Webcam Inset",
+                                       coalesceKey: "webcamInset")
+            }
+        }
     }
 
     /// Auto-generated zoom-in moments derived from the click event log.
@@ -67,6 +95,9 @@ final class EditorViewModel {
             if oldValue != zoomEnabled {
                 Settings.shared.editorSmartZoomEnabled = zoomEnabled
                 applyLayout()
+                registerUndoableChange(\.zoomEnabled, from: oldValue,
+                                       actionName: "Toggle Smart Zoom",
+                                       coalesceKey: "zoomEnabled")
             }
         }
     }
@@ -78,6 +109,9 @@ final class EditorViewModel {
             if oldValue != webcamTransitions {
                 Settings.shared.editorWebcamTransitions = webcamTransitions
                 applyLayout()
+                registerUndoableChange(\.webcamTransitions, from: oldValue,
+                                       actionName: "Change Webcam Transitions",
+                                       coalesceKey: "webcamTransitions")
             }
         }
     }
@@ -90,6 +124,9 @@ final class EditorViewModel {
             if oldValue != cursorRipplesEnabled {
                 Settings.shared.editorCursorRipplesEnabled = cursorRipplesEnabled
                 applyLayout()
+                registerUndoableChange(\.cursorRipplesEnabled, from: oldValue,
+                                       actionName: "Toggle Click Ripples",
+                                       coalesceKey: "cursorRipplesEnabled")
             }
         }
     }
@@ -106,6 +143,136 @@ final class EditorViewModel {
     /// block the loading overlay.
     private(set) var waveformSamples: [Float] = []
 
+    // MARK: - Undo / Redo
+
+    /// Standard Cocoa `UndoManager`. Every user-driven editor mutation
+    /// registers its inverse here; ⌘Z / ⌘⇧Z in `EditorView` drive it.
+    let undoManager = UndoManager()
+
+    /// Bumped whenever the undo stack changes — used to drive SwiftUI
+    /// re-evaluation of `canUndo` / `canRedo` + the action-name
+    /// tooltips. `UndoManager` is not `@Observable`, so reading its
+    /// `canUndo` / `canRedo` directly from views never invalidates.
+    /// Reading `undoStackRevision` inside a computed property below
+    /// establishes the dependency; the notification observers in
+    /// `attachUndoObservers()` increment it on every stack change.
+    private(set) var undoStackRevision: Int = 0
+
+    /// SwiftUI-observable accessors that refresh whenever the stack
+    /// changes. Views should prefer these over `undoManager.canUndo` /
+    /// `undoManager.canRedo` directly.
+    var canUndo: Bool {
+        _ = undoStackRevision  // dependency
+        return undoManager.canUndo
+    }
+    var canRedo: Bool {
+        _ = undoStackRevision
+        return undoManager.canRedo
+    }
+    var undoActionName: String {
+        _ = undoStackRevision
+        return undoManager.undoActionName
+    }
+    var redoActionName: String {
+        _ = undoStackRevision
+        return undoManager.redoActionName
+    }
+
+    /// Key of the last coalesceable undo registration. When the same
+    /// key is touched again within `undoCoalesceInterval`, we suppress
+    /// the new registration so a slider drag becomes a single undo
+    /// step back to its pre-drag value (not dozens of tiny steps).
+    @ObservationIgnored private var lastUndoCoalesceKey: AnyHashable?
+    @ObservationIgnored private var lastUndoCoalesceTime: Date = .distantPast
+    private let undoCoalesceInterval: TimeInterval = 0.5
+
+    /// Register an inverse for a simple property assignment. `oldValue`
+    /// is the pre-mutation value (usually captured via `didSet`'s
+    /// implicit `oldValue`). `coalesceKey` groups rapid repeat
+    /// mutations of the same logical property.
+    ///
+    /// Safe to call during `isUndoing` / `isRedoing` — `UndoManager`
+    /// automatically detects direction and puts the inverse on the
+    /// right stack. We bypass coalescing in those cases so a rapid
+    /// undo doesn't swallow the redo registration.
+    fileprivate func registerUndoableChange<T>(
+        _ keyPath: ReferenceWritableKeyPath<EditorViewModel, T>,
+        from oldValue: T,
+        actionName: String,
+        coalesceKey: AnyHashable
+    ) {
+        let isUserDriven = !undoManager.isUndoing && !undoManager.isRedoing
+        if isUserDriven {
+            let now = Date()
+            if lastUndoCoalesceKey == coalesceKey,
+               now.timeIntervalSince(lastUndoCoalesceTime) < undoCoalesceInterval {
+                lastUndoCoalesceTime = now
+                return
+            }
+            lastUndoCoalesceKey = coalesceKey
+            lastUndoCoalesceTime = now
+        }
+        undoManager.registerUndo(withTarget: self) { target in
+            target[keyPath: keyPath] = oldValue
+        }
+        undoManager.setActionName(actionName)
+        undoStackRevision &+= 1
+    }
+
+    /// Snapshot-based variant with the same coalescing contract as
+    /// `registerUndoableChange`. Use this for "continuous" operations
+    /// (trim-handle drag, pill drag) on values that aren't backed by a
+    /// property's `didSet`, since the direct-assignment undo path relies
+    /// on `didSet` firing to register the redo.
+    fileprivate func registerCoalescedSnapshot<State>(
+        _ actionName: String,
+        coalesceKey: AnyHashable,
+        capture: @escaping (EditorViewModel) -> State,
+        oldState: State,
+        restore: @escaping (EditorViewModel, State) -> Void
+    ) {
+        let isUserDriven = !undoManager.isUndoing && !undoManager.isRedoing
+        if isUserDriven {
+            let now = Date()
+            if lastUndoCoalesceKey == coalesceKey,
+               now.timeIntervalSince(lastUndoCoalesceTime) < undoCoalesceInterval {
+                lastUndoCoalesceTime = now
+                return
+            }
+            lastUndoCoalesceKey = coalesceKey
+            lastUndoCoalesceTime = now
+        }
+        registerUndoableSnapshot(actionName, capture: capture, oldState: oldState, restore: restore)
+    }
+
+    /// Register an inverse for a "snapshot" mutation — used when an
+    /// operation changes multiple pieces of state at once (e.g. adding
+    /// a keyframe touches both the array and a persisted sidecar).
+    /// `restore` re-applies the given state + any follow-up work
+    /// (applyLayout, persist…). The helper handles re-registering the
+    /// opposite direction so redo works indefinitely.
+    fileprivate func registerUndoableSnapshot<State>(
+        _ actionName: String,
+        capture: @escaping (EditorViewModel) -> State,
+        oldState: State,
+        restore: @escaping (EditorViewModel, State) -> Void
+    ) {
+        // Snapshot ops are always discrete — no coalescing.
+        lastUndoCoalesceKey = nil
+        undoManager.registerUndo(withTarget: self) { target in
+            let currentState = capture(target)
+            restore(target, oldState)
+            target.registerUndoableSnapshot(
+                actionName,
+                capture: capture,
+                oldState: currentState,
+                restore: restore
+            )
+        }
+        undoManager.setActionName(actionName)
+        undoStackRevision &+= 1
+    }
+
     /// Title cards baked into the export. Defaults load from Settings (or
     /// the built-in defaults on first run). Each change persists, so the
     /// next recording opens with the same title/colors/fade duration. The
@@ -117,6 +284,9 @@ final class EditorViewModel {
             if oldValue != startCard {
                 Settings.shared.editorStartCard = startCard
                 applyLayout()
+                registerUndoableChange(\.startCard, from: oldValue,
+                                       actionName: "Change Start Card",
+                                       coalesceKey: "startCard")
             }
         }
     }
@@ -125,6 +295,9 @@ final class EditorViewModel {
             if oldValue != endCard {
                 Settings.shared.editorEndCard = endCard
                 applyLayout()
+                registerUndoableChange(\.endCard, from: oldValue,
+                                       actionName: "Change End Card",
+                                       coalesceKey: "endCard")
             }
         }
     }
@@ -134,6 +307,9 @@ final class EditorViewModel {
         didSet {
             if oldValue != exportQuality {
                 Settings.shared.exportQuality = exportQuality
+                registerUndoableChange(\.exportQuality, from: oldValue,
+                                       actionName: "Change Export Quality",
+                                       coalesceKey: "exportQuality")
             }
         }
     }
@@ -146,6 +322,9 @@ final class EditorViewModel {
             if oldValue != audioMixVolumes {
                 Settings.shared.editorAudioMixVolumes = audioMixVolumes
                 rebuildAndApplyAudioMix()
+                registerUndoableChange(\.audioMixVolumes, from: oldValue,
+                                       actionName: "Change Audio Mix",
+                                       coalesceKey: "audioMixVolumes")
             }
         }
     }
@@ -298,6 +477,22 @@ final class EditorViewModel {
         }
     }
 
+    /// Run undo + refresh observation state. Callers (buttons + ⌘Z
+    /// handler) should use this instead of calling `undoManager.undo()`
+    /// directly — it guarantees `canUndo` / `canRedo` / action names
+    /// re-read correctly afterwards.
+    func performUndo() {
+        guard undoManager.canUndo else { return }
+        undoManager.undo()
+        undoStackRevision &+= 1
+    }
+
+    func performRedo() {
+        guard undoManager.canRedo else { return }
+        undoManager.redo()
+        undoStackRevision &+= 1
+    }
+
     private func attachPlayerObservers() {
         // Periodic time observer — drives the scrubber + trim-end enforcement.
         // ~30 updates/sec is plenty for a timeline UI and is cheap.
@@ -378,8 +573,23 @@ final class EditorViewModel {
         let minGap = CMTime(value: 250, timescale: 1000)
         let upperBound = CMTimeSubtract(trimEnd, minGap)
         let clamped = clamp(time, lower: .zero, upper: upperBound)
+        guard clamped != trimStart else { return }
+        let old = trimStart
         trimStart = clamped
         applyLayout()  // outputRange shifted — re-prime cards/fades
+        // trimStart is a plain var (no `didSet`), so the keypath-based
+        // helper can't rely on didSet to register the redo. Use the
+        // snapshot form, which explicitly re-registers inside its undo
+        // closure.
+        registerCoalescedSnapshot(
+            "Change Trim In",
+            coalesceKey: "trimStart",
+            capture: { $0.trimStart },
+            oldState: old
+        ) { vm, state in
+            vm.trimStart = state
+            vm.applyLayout()
+        }
     }
 
     /// Set the out-point. Clamped so there's at least 0.25s of trim duration.
@@ -387,17 +597,39 @@ final class EditorViewModel {
         let minGap = CMTime(value: 250, timescale: 1000)
         let lowerBound = CMTimeAdd(trimStart, minGap)
         let clamped = clamp(time, lower: lowerBound, upper: duration)
+        guard clamped != trimEnd else { return }
+        let old = trimEnd
         trimEnd = clamped
         applyLayout()
+        registerCoalescedSnapshot(
+            "Change Trim Out",
+            coalesceKey: "trimEnd",
+            capture: { $0.trimEnd },
+            oldState: old
+        ) { vm, state in
+            vm.trimEnd = state
+            vm.applyLayout()
+        }
     }
 
     func setTrimStartToCurrent() { setTrimStart(currentTime) }
     func setTrimEndToCurrent()   { setTrimEnd(currentTime) }
 
     func clearTrim() {
+        let oldStart = trimStart
+        let oldEnd = trimEnd
         trimStart = .zero
         trimEnd = duration
         applyLayout()
+        registerUndoableSnapshot(
+            "Reset Trim",
+            capture: { vm in (vm.trimStart, vm.trimEnd) },
+            oldState: (oldStart, oldEnd)
+        ) { vm, state in
+            vm.trimStart = state.0
+            vm.trimEnd = state.1
+            vm.applyLayout()
+        }
     }
 
     /// Re-run silence detection on the mic track and apply the detected
@@ -413,9 +645,20 @@ final class EditorViewModel {
             ) else { return }
             await MainActor.run {
                 guard let self else { return }
+                let oldStart = self.trimStart
+                let oldEnd = self.trimEnd
                 self.trimStart = detected.start
                 self.trimEnd   = detected.end
                 self.applyLayout()
+                self.registerUndoableSnapshot(
+                    "Auto-Trim Silence",
+                    capture: { vm in (vm.trimStart, vm.trimEnd) },
+                    oldState: (oldStart, oldEnd)
+                ) { vm, state in
+                    vm.trimStart = state.0
+                    vm.trimEnd = state.1
+                    vm.applyLayout()
+                }
             }
         }
     }
@@ -559,6 +802,7 @@ final class EditorViewModel {
             holdEndTime: holdEnd,
             outDuration: Self.talkingHeadInOut
         )
+        let old = talkingHeadKeyframes
         talkingHeadKeyframes.append(kf)
         talkingHeadKeyframes.sort { CMTimeCompare($0.startTime, $1.startTime) < 0 }
         // Move the playhead to the new keyframe so the user gets a
@@ -566,12 +810,43 @@ final class EditorViewModel {
         seek(to: slot.start)
         applyLayout()
         persistTalkingHeadLog()
+        registerTalkingHeadUndo(oldState: old, actionName: "Add Talking Head")
     }
 
     func removeTalkingHeadKeyframe(id: UUID) {
+        let old = talkingHeadKeyframes
         talkingHeadKeyframes.removeAll { $0.id == id }
         applyLayout()
         persistTalkingHeadLog()
+        registerTalkingHeadUndo(oldState: old, actionName: "Remove Talking Head")
+    }
+
+    /// Snapshot undo helper for the talking-head keyframes array.
+    private func registerTalkingHeadUndo(oldState: [TalkingHeadKeyframe], actionName: String) {
+        registerUndoableSnapshot(
+            actionName,
+            capture: { $0.talkingHeadKeyframes },
+            oldState: oldState
+        ) { vm, state in
+            vm.talkingHeadKeyframes = state
+            vm.applyLayout()
+            vm.persistTalkingHeadLog()
+        }
+    }
+
+    private func registerCoalescedTalkingHeadUndo(oldState: [TalkingHeadKeyframe], actionName: String, coalesceKey: AnyHashable) {
+        let isUserDriven = !undoManager.isUndoing && !undoManager.isRedoing
+        if isUserDriven {
+            let now = Date()
+            if lastUndoCoalesceKey == coalesceKey,
+               now.timeIntervalSince(lastUndoCoalesceTime) < undoCoalesceInterval {
+                lastUndoCoalesceTime = now
+                return
+            }
+            lastUndoCoalesceKey = coalesceKey
+            lastUndoCoalesceTime = now
+        }
+        registerTalkingHeadUndo(oldState: oldState, actionName: actionName)
     }
 
     /// Move a talking-head keyframe so its `startTime` becomes
@@ -590,12 +865,16 @@ final class EditorViewModel {
         let minStart = prev?.endTime ?? .zero
         let maxStart = CMTimeSubtract(next?.startTime ?? duration, kfDur)
         let clamped = clamp(newStart, lower: minStart, upper: maxStart)
+        guard clamped != kf.startTime else { return }
+        let oldState = talkingHeadKeyframes
         let delta = CMTimeSubtract(clamped, kf.startTime)
         talkingHeadKeyframes[idx].startTime = clamped
         talkingHeadKeyframes[idx].holdEndTime = CMTimeAdd(kf.holdEndTime, delta)
         talkingHeadKeyframes.sort { CMTimeCompare($0.startTime, $1.startTime) < 0 }
         applyLayout()
         persistTalkingHeadLog()
+        registerCoalescedTalkingHeadUndo(oldState: oldState, actionName: "Move Talking Head",
+                                         coalesceKey: "thMove:\(id.uuidString)")
     }
 
     /// Update a keyframe's hold duration (keeping `startTime` + in/out).
@@ -624,21 +903,30 @@ final class EditorViewModel {
         let clampedSeconds = min(max(requestedSeconds, minHoldSeconds), maxHoldSeconds)
         let newHoldEnd = CMTimeAdd(holdStart, CMTime(seconds: clampedSeconds, preferredTimescale: 600))
 
+        guard newHoldEnd != kf.holdEndTime else { return }
+        let oldState = talkingHeadKeyframes
         var updated = kf
         updated.holdEndTime = newHoldEnd
         talkingHeadKeyframes[idx] = updated
         applyLayout()
         persistTalkingHeadLog()
+        registerCoalescedTalkingHeadUndo(oldState: oldState, actionName: "Change Talking-Head Hold",
+                                         coalesceKey: "thHold:\(id.uuidString)")
     }
 
     /// Update a keyframe's target diameter fraction (0.2 … 0.95).
     func setTalkingHeadDiameterFraction(id: UUID, fraction: CGFloat) {
         guard let idx = talkingHeadKeyframes.firstIndex(where: { $0.id == id }) else { return }
+        let clamped = max(0.2, min(0.95, fraction))
+        guard clamped != talkingHeadKeyframes[idx].targetDiameterFraction else { return }
+        let oldState = talkingHeadKeyframes
         var updated = talkingHeadKeyframes[idx]
-        updated.targetDiameterFraction = max(0.2, min(0.95, fraction))
+        updated.targetDiameterFraction = clamped
         talkingHeadKeyframes[idx] = updated
         applyLayout()
         persistTalkingHeadLog()
+        registerCoalescedTalkingHeadUndo(oldState: oldState, actionName: "Change Talking-Head Size",
+                                         coalesceKey: "thSize:\(id.uuidString)")
     }
 
     // MARK: - Zoom-keyframe editing
@@ -710,17 +998,37 @@ final class EditorViewModel {
             target: target,
             scale: Self.defaultZoomScale
         )
+        let old = zoomKeyframes
         zoomKeyframes.append(kf)
         zoomKeyframes.sort { CMTimeCompare($0.startTime, $1.startTime) < 0 }
         seek(to: slot.start)
         applyLayout()
         persistZoomLog()
+        registerZoomKeyframesUndo(oldState: old, actionName: "Add Zoom")
     }
 
     func removeZoomKeyframe(id: UUID) {
+        let old = zoomKeyframes
         zoomKeyframes.removeAll { $0.id == id }
         applyLayout()
         persistZoomLog()
+        registerZoomKeyframesUndo(oldState: old, actionName: "Remove Zoom")
+    }
+
+    /// Snapshot undo helper for the zoom-keyframes array. Used by add /
+    /// remove / regenerate — anything that mutates the whole list.
+    /// For scrubbing-style mutations (move, hold, scale), the per-
+    /// field setters use their own coalescing wrapper below.
+    private func registerZoomKeyframesUndo(oldState: [ZoomKeyframe], actionName: String) {
+        registerUndoableSnapshot(
+            actionName,
+            capture: { $0.zoomKeyframes },
+            oldState: oldState
+        ) { vm, state in
+            vm.zoomKeyframes = state
+            vm.applyLayout()
+            vm.persistZoomLog()
+        }
     }
 
     /// Move an entire zoom keyframe so its `startTime` becomes `newStart`
@@ -740,12 +1048,16 @@ final class EditorViewModel {
         let minStart = prev?.endTime ?? .zero
         let maxStart = CMTimeSubtract(next?.startTime ?? duration, kfDur)
         let clamped = clamp(newStart, lower: minStart, upper: maxStart)
+        guard clamped != kf.startTime else { return }
+        let oldState = zoomKeyframes
         let delta = CMTimeSubtract(clamped, kf.startTime)
         zoomKeyframes[idx].startTime = clamped
         zoomKeyframes[idx].holdEndTime = CMTimeAdd(kf.holdEndTime, delta)
         zoomKeyframes.sort { CMTimeCompare($0.startTime, $1.startTime) < 0 }
         applyLayout()
         persistZoomLog()
+        registerCoalescedZoomUndo(oldState: oldState, actionName: "Move Zoom",
+                                  coalesceKey: "zoomMove:\(id.uuidString)")
     }
 
     /// Update a keyframe's hold duration, clamped against the next
@@ -763,22 +1075,33 @@ final class EditorViewModel {
         let maxHoldS = max(0.25, CMTimeGetSeconds(maxHoldEnd) - CMTimeGetSeconds(holdStart))
         let requestedS = CMTimeGetSeconds(hold)
         let clampedS = min(max(requestedS, 0.25), maxHoldS)
-        zoomKeyframes[idx].holdEndTime = CMTimeAdd(holdStart, CMTime(seconds: clampedS, preferredTimescale: 600))
+        let newHoldEnd = CMTimeAdd(holdStart, CMTime(seconds: clampedS, preferredTimescale: 600))
+        guard newHoldEnd != kf.holdEndTime else { return }
+        let oldState = zoomKeyframes
+        zoomKeyframes[idx].holdEndTime = newHoldEnd
         applyLayout()
         persistZoomLog()
+        registerCoalescedZoomUndo(oldState: oldState, actionName: "Change Zoom Hold",
+                                  coalesceKey: "zoomHold:\(id.uuidString)")
     }
 
     /// Update a keyframe's peak scale (1.1 … 2.5).
     func setZoomKeyframeScale(id: UUID, scale: CGFloat) {
         guard let idx = zoomKeyframes.firstIndex(where: { $0.id == id }) else { return }
-        zoomKeyframes[idx].scale = max(1.0, min(2.5, scale))
+        let clamped = max(1.0, min(2.5, scale))
+        guard clamped != zoomKeyframes[idx].scale else { return }
+        let oldState = zoomKeyframes
+        zoomKeyframes[idx].scale = clamped
         applyLayout()
         persistZoomLog()
+        registerCoalescedZoomUndo(oldState: oldState, actionName: "Change Zoom Scale",
+                                  coalesceKey: "zoomScale:\(id.uuidString)")
     }
 
     /// Wipe persisted keyframes and regenerate from the click log.
     /// Destructive — user explicitly confirms by clicking the button.
     func regenerateZoomFromClicks() {
+        let old = zoomKeyframes
         zoomKeyframes = ZoomKeyframeGenerator.generate(
             from: project.eventLog,
             metadata: project.metadata,
@@ -786,6 +1109,27 @@ final class EditorViewModel {
         )
         applyLayout()
         persistZoomLog()
+        registerZoomKeyframesUndo(oldState: old, actionName: "Regenerate Zoom")
+    }
+
+    /// Coalescing variant of the zoom-keyframes undo registration.
+    /// First mutation in a streak captures the pre-streak state; rapid
+    /// follow-ups within `undoCoalesceInterval` are suppressed so one
+    /// slider drag / pill drag = one undo step back to the pre-drag
+    /// state instead of dozens of micro-steps.
+    private func registerCoalescedZoomUndo(oldState: [ZoomKeyframe], actionName: String, coalesceKey: AnyHashable) {
+        let isUserDriven = !undoManager.isUndoing && !undoManager.isRedoing
+        if isUserDriven {
+            let now = Date()
+            if lastUndoCoalesceKey == coalesceKey,
+               now.timeIntervalSince(lastUndoCoalesceTime) < undoCoalesceInterval {
+                lastUndoCoalesceTime = now
+                return
+            }
+            lastUndoCoalesceKey = coalesceKey
+            lastUndoCoalesceTime = now
+        }
+        registerZoomKeyframesUndo(oldState: oldState, actionName: actionName)
     }
 
     private func persistZoomLog() {

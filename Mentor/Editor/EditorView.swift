@@ -90,12 +90,27 @@ struct EditorView: View {
             // Shift+arrow = 1s step. SwiftUI's `.onKeyPress(.leftArrow)`
             // above fires for unmodified arrows; this catches the shifted
             // variants.
-            guard press.modifiers.contains(.shift) else { return .ignored }
-            switch press.key {
-            case .leftArrow:  vm.stepSecond(forward: false); return .handled
-            case .rightArrow: vm.stepSecond(forward: true);  return .handled
-            default: return .ignored
+            if press.modifiers.contains(.shift) && !press.modifiers.contains(.command) {
+                switch press.key {
+                case .leftArrow:  vm.stepSecond(forward: false); return .handled
+                case .rightArrow: vm.stepSecond(forward: true);  return .handled
+                default: break
+                }
             }
+            // ⌘Z / ⌘⇧Z — undo/redo. Handled here (rather than via a
+            // hidden button with `.keyboardShortcut`) because the app is
+            // `LSUIElement`, so there's no main menu bar to route an
+            // Edit → Undo menu item through the responder chain.
+            if press.modifiers.contains(.command),
+               press.characters.lowercased() == "z" {
+                if press.modifiers.contains(.shift) {
+                    vm.performRedo()
+                } else {
+                    vm.performUndo()
+                }
+                return .handled
+            }
+            return .ignored
         }
     }
 
@@ -941,6 +956,24 @@ private struct TimelineView: View {
             Divider().frame(height: 16)
 
             Button {
+                viewModel.performUndo()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .disabled(!viewModel.canUndo)
+            .help(undoTooltip)
+
+            Button {
+                viewModel.performRedo()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            .disabled(!viewModel.canRedo)
+            .help(redoTooltip)
+
+            Divider().frame(height: 16)
+
+            Button {
                 viewModel.setTrimStartToCurrent()
             } label: {
                 Label("Set In", systemImage: "arrow.down.to.line.compact")
@@ -977,6 +1010,16 @@ private struct TimelineView: View {
     }
 
     // MARK: Helpers
+
+    private var undoTooltip: String {
+        let name = viewModel.undoActionName
+        return name.isEmpty ? "Undo (⌘Z)" : "Undo \(name) (⌘Z)"
+    }
+
+    private var redoTooltip: String {
+        let name = viewModel.redoActionName
+        return name.isEmpty ? "Redo (⌘⇧Z)" : "Redo \(name) (⌘⇧Z)"
+    }
 
     private var trimSummary: String {
         let start = timeString(viewModel.trimStart)
