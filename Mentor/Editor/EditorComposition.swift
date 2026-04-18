@@ -38,13 +38,28 @@ enum EditorComposition {
 
     /// Lower-level builder that only needs the bundle layout + metadata —
     /// used by the renderer, which doesn't need a full `RecordingProject`.
+    ///
+    /// `micOverride`: when non-nil and the file exists, that URL is used
+    /// as the mic source instead of `bundle.micAudioURL`. This is how
+    /// editor-time noise reduction swaps in the cleaned CAF — everything
+    /// else in the composition stays identical, including track ID
+    /// assignment semantics (the override just feeds a different file
+    /// into the mic track).
     static func build(
         bundle: RecordingBundle,
-        metadata: RecordingMetadata
+        metadata: RecordingMetadata,
+        micOverride: URL? = nil
     ) async throws -> Result {
+        let effectiveMicURL: URL = {
+            if let override = micOverride,
+               FileManager.default.fileExists(atPath: override.path) {
+                return override
+            }
+            return bundle.micAudioURL
+        }()
         let screenAsset = AVURLAsset(url: bundle.screenVideoURL)
         let webcamAsset = AVURLAsset(url: bundle.webcamVideoURL)
-        let micAsset    = AVURLAsset(url: bundle.micAudioURL)
+        let micAsset    = AVURLAsset(url: effectiveMicURL)
         let systemAsset = AVURLAsset(url: bundle.systemAudioURL)
 
         async let screenVideoTracks = screenAsset.loadTracks(withMediaType: .video)
@@ -92,7 +107,7 @@ enum EditorComposition {
         var systemID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
         var soundboardID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
 
-        if FileManager.default.fileExists(atPath: bundle.micAudioURL.path) {
+        if FileManager.default.fileExists(atPath: effectiveMicURL.path) {
             if let micTrack = try? await micAsset.loadTracks(withMediaType: .audio).first,
                let micCompTrack = composition.addMutableTrack(
                    withMediaType: .audio,

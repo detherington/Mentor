@@ -258,6 +258,17 @@ extension TrimMap {
         }
     }
 
+    /// Remap keystroke chips. Chips inside a cut region are dropped;
+    /// the remainder are translated to output-time so the post-cut
+    /// export shows them at the moment the preserved keystroke fires.
+    func remap(keystrokeChips: [KeystrokeChip]) -> [KeystrokeChip] {
+        keystrokeChips.compactMap { chip in
+            if isCut(chip.time) { return nil }
+            let mapped = outputTime(forSourceTime: chip.time)
+            return KeystrokeChip(id: chip.id, time: mapped, label: chip.label)
+        }
+    }
+
     func remap(transcriptionLines: [TranscriptionLine]) -> [TranscriptionLine] {
         transcriptionLines.compactMap { line in
             let startCM = CMTime(seconds: line.startSeconds, preferredTimescale: 600)
@@ -273,6 +284,26 @@ extension TrimMap {
                 endSeconds: newEndSec
             )
         }
+    }
+
+    /// Remap a cursor-highlight track. Samples inside cut regions are
+    /// dropped; remaining samples' `t` values are translated to
+    /// output-time so the post-cut export's halo tracks correctly.
+    /// The compositor interpolates linearly between surviving samples,
+    /// which produces a clean jump at each cut boundary.
+    func remap(cursorTrack: CursorHighlightTrack) -> CursorHighlightTrack {
+        guard !cursorTrack.points.isEmpty else { return .empty }
+        let remapped: [CursorHighlightTrack.Point] = cursorTrack.points.compactMap { p in
+            let srcTime = CMTime(seconds: p.t, preferredTimescale: 600)
+            if isCut(srcTime) { return nil }
+            let outTime = outputTime(forSourceTime: srcTime)
+            return CursorHighlightTrack.Point(
+                t: CMTimeGetSeconds(outTime),
+                x: p.x,
+                y: p.y
+            )
+        }
+        return CursorHighlightTrack(points: remapped)
     }
 }
 

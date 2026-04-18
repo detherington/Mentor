@@ -41,6 +41,7 @@ final class CaptureCoordinator: @unchecked Sendable {
     private var micAudioWriter: AudioWriter?
     private var systemAudioWriter: AudioWriter?
     private var eventRecorder: EventRecorder?
+    private var cursorSampler: CursorSampler?
     private var currentBundle: RecordingBundle?
     private var currentMetadata: RecordingMetadata?
     private var latestCameraBuffer: CVPixelBuffer?
@@ -140,6 +141,14 @@ final class CaptureCoordinator: @unchecked Sendable {
         let eventRec = EventRecorder()
         eventRec.start()
 
+        // Cursor position sampler — separate from the event recorder
+        // because it runs a timer instead of an event monitor and has
+        // no Accessibility dependency. Feeds the editor's cursor-
+        // highlight halo; older recordings without this sidecar just
+        // get no halo (graceful degradation).
+        let cursorSamp = CursorSampler()
+        cursorSamp.start()
+
         let metadata = RecordingMetadata(
             version: 1,
             startDate: Date(),
@@ -163,6 +172,7 @@ final class CaptureCoordinator: @unchecked Sendable {
         self.micAudioWriter = micWriter
         self.systemAudioWriter = systemWriter
         self.eventRecorder = eventRec
+        self.cursorSampler = cursorSamp
         self.currentBundle = bundle
         self.currentMetadata = metadata
         latestCameraBuffer = nil
@@ -189,6 +199,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             self.micAudioWriter = nil
             self.systemAudioWriter = nil
             self.eventRecorder = nil
+            self.cursorSampler = nil
             self.currentBundle = nil
             self.currentMetadata = nil
             pipelineLock.unlock()
@@ -197,6 +208,7 @@ final class CaptureCoordinator: @unchecked Sendable {
             _ = await micWriter.finish()
             _ = await systemWriter?.finish()
             _ = eventRec.stop()
+            _ = cursorSamp.stop()
             if let soundboard {
                 await soundboard.stopRecordingTap()
             }
@@ -242,6 +254,7 @@ final class CaptureCoordinator: @unchecked Sendable {
         let micWriter = self.micAudioWriter
         let sysWriter = self.systemAudioWriter
         let eventRec = self.eventRecorder
+        let cursorSamp = self.cursorSampler
         let bundle = self.currentBundle
         let metadata = self.currentMetadata
         self.screenRawWriter = nil
@@ -249,6 +262,7 @@ final class CaptureCoordinator: @unchecked Sendable {
         self.micAudioWriter = nil
         self.systemAudioWriter = nil
         self.eventRecorder = nil
+        self.cursorSampler = nil
         self.currentBundle = nil
         self.currentMetadata = nil
         latestCameraBuffer = nil
@@ -264,6 +278,9 @@ final class CaptureCoordinator: @unchecked Sendable {
         // Flush event log + metadata.
         if let bundle, let eventRec, let log = eventRec.stop() {
             persistJSON(log, to: bundle.eventsURL)
+        }
+        if let bundle, let cursorLog = cursorSamp?.stop() {
+            persistJSON(cursorLog, to: bundle.cursorLogURL)
         }
         if let bundle, let metadata {
             persistJSON(metadata, to: bundle.metadataURL)

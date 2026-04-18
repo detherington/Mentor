@@ -43,6 +43,19 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             /// false → compositor short-circuits before per-frame lookup.
             let transcriptionLines: [TranscriptionLine]
             let captionStyle: CaptionStyle
+            /// Keystroke overlay chips. Same short-circuit rule —
+            /// empty or `style.enabled == false` bypasses the overlay
+            /// pass entirely.
+            let keystrokeChips: [KeystrokeChip]
+            let keystrokeOverlayStyle: KeystrokeOverlayStyle
+            /// Always-on cursor highlight halo. Position is interpolated
+            /// from the samples in `cursorTrack`. Empty track or
+            /// `style.enabled == false` skips the overlay entirely.
+            let cursorTrack: CursorHighlightTrack
+            let cursorHighlightStyle: CursorHighlightStyle
+            /// Webcam background processing (blur / color). `off` skips
+            /// the per-frame segmentation pass entirely.
+            let webcamBackgroundStyle: WebcamBackgroundStyle
         }
 
         private let lock = NSLock()
@@ -71,7 +84,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             cursorRippleStyle: CursorRippleStyle? = nil,
             talkingHeadKeyframes: [TalkingHeadKeyframe]? = nil,
             transcriptionLines: [TranscriptionLine]? = nil,
-            captionStyle: CaptionStyle? = nil
+            captionStyle: CaptionStyle? = nil,
+            keystrokeChips: [KeystrokeChip]? = nil,
+            keystrokeOverlayStyle: KeystrokeOverlayStyle? = nil,
+            cursorTrack: CursorHighlightTrack? = nil,
+            cursorHighlightStyle: CursorHighlightStyle? = nil,
+            webcamBackgroundStyle: WebcamBackgroundStyle? = nil
         ) {
             lock.lock(); defer { lock.unlock() }
             current = Snapshot(
@@ -88,7 +106,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
                 cursorRippleStyle: cursorRippleStyle ?? current.cursorRippleStyle,
                 talkingHeadKeyframes: talkingHeadKeyframes ?? current.talkingHeadKeyframes,
                 transcriptionLines: transcriptionLines ?? current.transcriptionLines,
-                captionStyle: captionStyle ?? current.captionStyle
+                captionStyle: captionStyle ?? current.captionStyle,
+                keystrokeChips: keystrokeChips ?? current.keystrokeChips,
+                keystrokeOverlayStyle: keystrokeOverlayStyle ?? current.keystrokeOverlayStyle,
+                cursorTrack: cursorTrack ?? current.cursorTrack,
+                cursorHighlightStyle: cursorHighlightStyle ?? current.cursorHighlightStyle,
+                webcamBackgroundStyle: webcamBackgroundStyle ?? current.webcamBackgroundStyle
             )
         }
     }
@@ -109,7 +132,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             cursorRippleStyle: .default,
             talkingHeadKeyframes: [],
             transcriptionLines: [],
-            captionStyle: .default
+            captionStyle: .default,
+            keystrokeChips: [],
+            keystrokeOverlayStyle: .default,
+            cursorTrack: .empty,
+            cursorHighlightStyle: .default,
+            webcamBackgroundStyle: .default
         )
     )
 
@@ -154,6 +182,14 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
     // re-render when the active line changes.
     private var cachedCaptionKey: String?
     private var cachedCaptionImage: CIImage?
+
+    // Keystroke chip cache — keyed by label + font-pt + output size.
+    // Multiple chips can be active in the same frame (e.g. a burst of
+    // ⌘S ⌘Enter), so we need a dict. Size rarely changes after the
+    // compositor's first frame; we flush the cache when the sizing key
+    // shifts to keep the dict from growing unbounded across style edits.
+    private var cachedChipImages: [String: (image: CIImage, size: CGSize)] = [:]
+    private var cachedChipSizingKey: String = ""
 
     private var debugFrameCount: Int64 = 0
 
@@ -259,9 +295,15 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         if let screen {
             let screenImage = CIImage(cvPixelBuffer: screen)
             var filled = scaledToFill(screenImage, size: outputSize)
+            // Cursor highlight halo — rendered UNDER ripples so a click
+            // on the halo shows the expanding ripple on top, and BEFORE
+            // zoom so the halo gets magnified along with the cursor.
+            if let halo = renderCursorHighlight(at: frameTime, layout: layout) {
+                filled = halo.composited(over: filled)
+            }
             // Ripples ride on the screen layer, so smart zoom magnifies
-            // them along with the click point. Order: screen → ripples →
-            // zoom → webcam → cards.
+            // them along with the click point. Order: screen → halo →
+            // ripples → zoom → webcam → cards.
             if let ripples = renderCursorRipples(at: frameTime, layout: layout, canvasSize: outputSize) {
                 filled = ripples.composited(over: filled)
             }
@@ -276,7 +318,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             // interpolated against any active talking-head keyframe.
             let (effDiameter, effOrigin) = webcamGeometry(layout: layout, time: frameTime, outputSize: outputSize)
             if effDiameter > 0,
-               var overlay = buildWebcamImage(camera: webcam, shape: layout.shape, diameter: effDiameter) {
+               var overlay = buildWebcamImage(
+                   camera: webcam,
+                   shape: layout.shape,
+                   diameter: effDiameter,
+                   backgroundStyle: layout.webcamBackgroundStyle
+               ) {
                 let timeInOutput = layout.trimMap.outputTime(forSourceTime: frameTime)
                 let webcamAlpha = layout.webcamTransitions.alpha(
                     at: timeInOutput,
@@ -296,6 +343,7 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
 
         composite = applyTitleCards(over: composite, layout: layout, time: frameTime, outputSize: outputSize)
         composite = applyCaptions(over: composite, layout: layout, time: frameTime, outputSize: outputSize)
+        composite = applyKeystrokeOverlay(over: composite, layout: layout, time: frameTime, outputSize: outputSize)
 
         let cropped = composite.cropped(to: CGRect(origin: .zero, size: outputSize))
         ciContext.render(
@@ -312,6 +360,22 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
     /// entirely. Each ripple is a stroked circle whose radius grows
     /// linearly from `initialRadius` to `finalRadius` over its lifetime,
     /// while opacity fades linearly to 0.
+    /// Render the always-on cursor highlight halo at the interpolated
+    /// cursor position for the current frame. Returns nil when the
+    /// overlay is disabled, the track is empty, or the cursor was off-
+    /// canvas at this moment (no sample to interpolate from).
+    private func renderCursorHighlight(
+        at time: CMTime,
+        layout: State.Snapshot
+    ) -> CIImage? {
+        let style = layout.cursorHighlightStyle
+        guard style.enabled, !layout.cursorTrack.points.isEmpty else { return nil }
+        let t = CMTimeGetSeconds(time)
+        guard t.isFinite else { return nil }
+        guard let pos = layout.cursorTrack.position(at: t) else { return nil }
+        return CursorHighlightRenderer.render(center: pos, style: style)
+    }
+
     private func renderCursorRipples(
         at time: CMTime,
         layout: State.Snapshot,
@@ -433,6 +497,117 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         // stringly-typed for trivial equality. Font sizing is derived
         // from `size` + `fontSizeFraction`, so both are in the key.
         "\(text)|\(Int(size.width))x\(Int(size.height))|\(style.fontSizeFraction)|\(style.bottomInsetFraction)|\(style.textColor.red),\(style.textColor.green),\(style.textColor.blue),\(style.textColor.alpha)|\(style.backgroundColor.red),\(style.backgroundColor.green),\(style.backgroundColor.blue),\(style.backgroundColor.alpha)"
+    }
+
+    /// Composite the keystroke-chip row over `base`. For each active
+    /// chip (time within the style's display window), we render a
+    /// rounded pill and fade it via a short in/out envelope. Chips are
+    /// laid out left-to-right by original press time, so the newest
+    /// appears on the right — matches how the on-screen keystrokes
+    /// naturally read.
+    private func applyKeystrokeOverlay(
+        over base: CIImage,
+        layout: State.Snapshot,
+        time: CMTime,
+        outputSize: CGSize
+    ) -> CIImage {
+        let style = layout.keystrokeOverlayStyle
+        guard style.enabled, !layout.keystrokeChips.isEmpty else { return base }
+        let now = CMTimeGetSeconds(time)
+        guard now.isFinite else { return base }
+
+        // Collect active chips (still inside their display lifetime).
+        struct Active {
+            let label: String
+            let elapsed: TimeInterval
+            let progress: Double   // 0..1 through lifetime
+        }
+        var active: [Active] = []
+        for chip in layout.keystrokeChips {
+            let elapsed = now - CMTimeGetSeconds(chip.time)
+            guard elapsed >= 0, elapsed <= style.displayDuration else { continue }
+            let progress = elapsed / max(style.displayDuration, 0.001)
+            active.append(Active(label: chip.label, elapsed: elapsed, progress: progress))
+        }
+        guard !active.isEmpty else { return base }
+
+        // Cap to the most recent `maxVisibleChips` (i.e. smallest
+        // elapsed first). The cap is on the rendered count — older
+        // ones still silently expire but we just don't place them.
+        if active.count > style.maxVisibleChips {
+            active.sort { $0.elapsed < $1.elapsed }
+            active = Array(active.prefix(style.maxVisibleChips))
+        }
+        // Order-to-draw: oldest leftmost → newest rightmost.
+        active.sort { $0.elapsed > $1.elapsed }
+
+        // Derive rasterisation params. Font size is fraction of the
+        // shorter canvas dimension — consistent across 16:9 / 4:3 /
+        // vertical sources.
+        let shortSide = min(outputSize.width, outputSize.height)
+        let fontSize = max(12, shortSide * style.fontSizeFraction)
+        let textColor = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+        let bgColor = CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.72)
+
+        // Flush cache if the sizing parameters moved; otherwise old
+        // rasterisations at the old font size would linger.
+        let sizingKey = "\(Int(outputSize.width))x\(Int(outputSize.height))|\(fontSize)"
+        if sizingKey != cachedChipSizingKey {
+            cachedChipImages.removeAll(keepingCapacity: true)
+            cachedChipSizingKey = sizingKey
+        }
+
+        // Render (or fetch) each chip, accumulate composited frames.
+        var composite = base
+        let spacing: CGFloat = fontSize * 0.4
+        var totalWidth: CGFloat = 0
+        var rendered: [(image: CIImage, size: CGSize, opacity: CGFloat)] = []
+        for a in active {
+            let img: (image: CIImage, size: CGSize)
+            if let cached = cachedChipImages[a.label] {
+                img = cached
+            } else {
+                guard let new = KeystrokeChipRenderer.render(
+                    label: a.label,
+                    fontSize: fontSize,
+                    textColor: textColor,
+                    backgroundColor: bgColor
+                ) else { continue }
+                cachedChipImages[a.label] = new
+                img = new
+            }
+            // Fade envelope: quick ease-in, long plateau, ease-out for
+            // the last 25%. Opacity peaks at 1 for ~half the lifetime.
+            let opacity: CGFloat
+            if a.progress < 0.12 {
+                opacity = CGFloat(a.progress / 0.12)
+            } else if a.progress > 0.75 {
+                opacity = CGFloat(1 - (a.progress - 0.75) / 0.25)
+            } else {
+                opacity = 1
+            }
+            rendered.append((img.image, img.size, opacity))
+            totalWidth += img.size.width
+        }
+        guard !rendered.isEmpty else { return base }
+        totalWidth += spacing * CGFloat(rendered.count - 1)
+
+        // Bottom-center the row.
+        let startX = (outputSize.width - totalWidth) / 2
+        let y = style.bottomInsetFraction * outputSize.height
+        var cursor = startX
+        for item in rendered {
+            if item.opacity > 0.001 {
+                let positioned = item.image
+                    .transformed(by: CGAffineTransform(translationX: cursor, y: y))
+                let faded = item.opacity < 0.999
+                    ? applyAlpha(item.opacity, to: positioned)
+                    : positioned
+                composite = faded.composited(over: composite)
+            }
+            cursor += item.size.width + spacing
+        }
+        return composite
     }
 
     private func applyTitleCards(
@@ -603,7 +778,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         return (effDiameter, effOrigin)
     }
 
-    private func buildWebcamImage(camera: CVPixelBuffer, shape: WebcamShape, diameter: CGFloat) -> CIImage? {
+    private func buildWebcamImage(
+        camera: CVPixelBuffer,
+        shape: WebcamShape,
+        diameter: CGFloat,
+        backgroundStyle: WebcamBackgroundStyle
+    ) -> CIImage? {
         let raw = CIImage(cvPixelBuffer: camera)
         let extent = raw.extent
         let side = min(extent.width, extent.height)
@@ -615,16 +795,37 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             .cropped(to: CGRect(x: cropX, y: cropY, width: side, height: side))
             .transformed(by: CGAffineTransform(translationX: -cropX, y: -cropY))
 
+        // Person-segmentation pass happens BEFORE the scale-to-diameter
+        // step. Running segmentation on the native webcam resolution
+        // gives the cleanest mask; scaling afterwards is a cheap
+        // bilinear resample. Uses Vision (`VNGeneratePersonSegmentation-
+        // Request`) on macOS — CIPersonSegmentation returns an empty
+        // mask on macOS and effectively blurs the whole frame.
+        let processed: CIImage
+        if backgroundStyle.mode != .off {
+            processed = WebcamBackgroundProcessor.apply(to: cropped, style: backgroundStyle)
+        } else {
+            processed = cropped
+        }
+
         let scale = diameter / side
-        let scaled = cropped.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let scaled = processed.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
 
         // Mirror horizontally for natural self-view (matches recorded composite).
         let mirrored = scaled
             .transformed(by: CGAffineTransform(scaleX: -1, y: 1))
             .transformed(by: CGAffineTransform(translationX: diameter, y: 0))
 
-        let mask = maskImage(shape: shape, diameter: diameter)
         let bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+        // Skip the shape-mask pass entirely when the user picked
+        // "No Shape" — the webcam's own alpha (for transparent bg
+        // mode) carries through untouched, giving a free-floating
+        // silhouette. For Circle / RoundedSquare we fall back to the
+        // standard luminance-mask clip.
+        guard shape != .none else {
+            return mirrored.cropped(to: bounds)
+        }
+        let mask = maskImage(shape: shape, diameter: diameter)
         let background = CIImage(color: CIColor.clear).cropped(to: bounds)
         // Use luminance-based mask (matches FrameCompositor); our mask has no
         // alpha channel, so `CIBlendWithAlphaMask` renders the webcam as a

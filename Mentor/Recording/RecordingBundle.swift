@@ -39,6 +39,17 @@ struct RecordingBundle {
     /// Burned-in subtitles — populated the first time the user clicks
     /// "Generate captions" in the editor, and used verbatim on reopen.
     var transcriptionURL: URL   { sidecarURL.appendingPathComponent("transcription.json") }
+    /// Per-frame cursor position samples (captured at 30 Hz during
+    /// recording). Feeds the cursor-highlight halo overlay — absent
+    /// in older recordings, in which case the overlay is unavailable
+    /// for those bundles.
+    var cursorLogURL: URL       { sidecarURL.appendingPathComponent("cursor.json") }
+    /// Offline-generated cleaned mic track (highpass + noise gate).
+    /// Only exists if the user has flipped noise reduction on for
+    /// this recording; absent otherwise. CAF (PCM) rather than m4a
+    /// so we skip an extra AAC re-encode round-trip — the final
+    /// export writer compresses this in a single pass anyway.
+    var cleanedMicAudioURL: URL { sidecarURL.appendingPathComponent("mic_cleaned.caf") }
 
     static func make(baseDirectory: URL, timestamp: Date = Date()) -> RecordingBundle {
         let formatter = DateFormatter()

@@ -178,7 +178,21 @@ struct EditorView: View {
         TimelineView(viewModel: vm)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .frame(height: 212)
+            .frame(height: timelineHeight(vm: vm))
+            .animation(.easeInOut(duration: 0.18), value: timelineHeight(vm: vm))
+    }
+
+    /// Total vertical space the timeline needs for its currently-
+    /// visible lanes. Base = header (~18) + padding (20) + main track
+    /// (40) + controls (~30) + spacing. Each visible secondary lane
+    /// adds its own height + 6pt inter-row spacing.
+    private func timelineHeight(vm: EditorViewModel) -> CGFloat {
+        var h: CGFloat = 18 + 20 + 40 + 30 + 12
+        for lane in TimelineLane.allCases where vm.isTimelineLaneVisible(lane) {
+            let rowH: CGFloat = (lane == .zoom) ? 18 : 14
+            h += rowH + 6
+        }
+        return h
     }
 
     // MARK: - Inspector
@@ -236,6 +250,8 @@ struct EditorView: View {
                     Text("Changes preview live. Original recording is untouched — changes only affect export.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    webcamBackgroundControls(vm: vm)
                 }
                 .disabled(vm.isExporting)
 
@@ -257,6 +273,8 @@ struct EditorView: View {
 
                 Divider()
 
+                cursorHighlightSection(vm: vm)
+
                 webcamTransitionsSection(vm: vm)
 
                 Divider()
@@ -270,6 +288,10 @@ struct EditorView: View {
                 Divider()
 
                 captionsSection(vm: vm)
+
+                Divider()
+
+                keystrokesSection(vm: vm)
 
                 Divider()
 
@@ -398,27 +420,90 @@ struct EditorView: View {
                 }
                 .controlSize(.small)
                 .disabled(!vm.canAddZoomAtPlayhead)
-                .help("Add a manual zoom keyframe at the playhead, targeting the centre of the canvas.")
+                .help("Add a manual zoom keyframe at the playhead, targeting the centre of the canvas. Uses your current Amount setting for the peak scale.")
             }
 
             Text(smartZoomHint(vm: vm))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            // Tuning knobs — live settings that shape both auto-
+            // regeneration AND manually-added keyframes at the
+            // playhead. Existing keyframes don't update until the user
+            // hits "Regenerate from clicks" (destructive — wipes edits).
+            DisclosureGroup("Tuning") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Amount").frame(width: 70, alignment: .leading)
+                        Slider(
+                            value: Binding(
+                                get: { vm.zoomTuning.scale },
+                                set: { var t = vm.zoomTuning; t.scale = $0; vm.zoomTuning = t }
+                            ),
+                            in: 1.1...2.0
+                        )
+                        Text(String(format: "%.2f×", vm.zoomTuning.scale))
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 48, alignment: .trailing)
+                    }
+                    HStack {
+                        Text("Hold").frame(width: 70, alignment: .leading)
+                        Slider(
+                            value: Binding(
+                                get: { vm.zoomTuning.holdSeconds },
+                                set: { var t = vm.zoomTuning; t.holdSeconds = $0; vm.zoomTuning = t }
+                            ),
+                            in: 0.1...2.5
+                        )
+                        Text(String(format: "%.1fs", vm.zoomTuning.holdSeconds))
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 48, alignment: .trailing)
+                    }
+                    HStack {
+                        Text("Sensitivity").frame(width: 70, alignment: .leading)
+                        Picker("", selection: Binding(
+                            get: { vm.zoomTuning.sensitivity },
+                            set: { var t = vm.zoomTuning; t.sensitivity = $0; vm.zoomTuning = t }
+                        )) {
+                            ForEach(ZoomTuning.Sensitivity.allCases) { s in
+                                Text(s.label).tag(s)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            vm.zoomTuning = .default
+                        } label: {
+                            Text("Reset")
+                        }
+                        .controlSize(.small)
+                        .help("Reset Amount / Hold / Sensitivity to their defaults.")
+
+                        Button {
+                            vm.regenerateZoomFromClicks()
+                        } label: {
+                            Label("Apply to Clicks", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .controlSize(.small)
+                        .help("Wipe any edits and re-run smart-zoom detection using these values.")
+                    }
+                    Text("Amount + Hold also apply to manually-added zooms via the \"Add\" button. Sensitivity only affects Regenerate.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 4)
+            }
+            .font(.subheadline)
+
             if !vm.zoomKeyframes.isEmpty {
                 ForEach(vm.zoomKeyframes) { kf in
                     zoomKeyframeRow(kf: kf, vm: vm)
                     Divider()
-                }
-                HStack {
-                    Spacer()
-                    Button(role: .destructive) {
-                        vm.regenerateZoomFromClicks()
-                    } label: {
-                        Label("Regenerate from clicks", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .controlSize(.small)
-                    .help("Wipe any edits and re-run smart-zoom detection on the click log.")
                 }
             }
         }
@@ -558,6 +643,9 @@ struct EditorView: View {
                 // transcriptions are a dozen-plus lines and an always-
                 // open list would dwarf every other inspector section.
                 CaptionEditList(vm: vm, lines: log.lines)
+
+                Toggle("Export .srt alongside MP4", isOn: $vm.exportSRTSidecar)
+                    .help("Writes a subtitle sidecar file next to the exported MP4. YouTube / Premiere / Final Cut / DaVinci all accept .srt. Timestamps reflect your trim + cuts.")
             } else {
                 Text("Transcribe your narration on-device to burn subtitles into the exported MP4. First run prompts for Speech Recognition permission.")
                     .font(.caption)
@@ -595,6 +683,233 @@ struct EditorView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+            }
+        }
+        .disabled(vm.isExporting)
+    }
+
+    // MARK: - Webcam background controls
+
+    @ViewBuilder
+    private func webcamBackgroundControls(vm: EditorViewModel) -> some View {
+        @Bindable var vm = vm
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Background")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+            }
+            Picker("", selection: Binding(
+                get: { vm.webcamBackgroundStyle.mode },
+                set: { var s = vm.webcamBackgroundStyle; s.mode = $0; vm.webcamBackgroundStyle = s }
+            )) {
+                ForEach(WebcamBackgroundMode.allCases) { m in
+                    Text(m.label).tag(m)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            switch vm.webcamBackgroundStyle.mode {
+            case .off:
+                Text("Raw webcam passes through to the overlay. No segmentation cost.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .blur:
+                HStack {
+                    Text("Strength").frame(width: 70, alignment: .leading)
+                    Slider(
+                        value: Binding(
+                            get: { vm.webcamBackgroundStyle.blurRadius },
+                            set: { var s = vm.webcamBackgroundStyle; s.blurRadius = $0; vm.webcamBackgroundStyle = s }
+                        ),
+                        in: 4...40
+                    )
+                    Text("\(Int(vm.webcamBackgroundStyle.blurRadius))")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 32, alignment: .trailing)
+                }
+            case .color:
+                ColorPicker("Color", selection: Binding(
+                    get: {
+                        let s = vm.webcamBackgroundStyle
+                        return Color(red: s.red, green: s.green, blue: s.blue)
+                    },
+                    set: { newColor in
+                        let nsColor = NSColor(newColor).usingColorSpace(.sRGB) ?? NSColor(newColor)
+                        var s = vm.webcamBackgroundStyle
+                        s.red = nsColor.redComponent
+                        s.green = nsColor.greenComponent
+                        s.blue = nsColor.blueComponent
+                        vm.webcamBackgroundStyle = s
+                    }
+                ))
+            case .transparent:
+                Text("Background is fully transparent — the screen recording shows through the webcam's shape. Great for a free-floating talking-head look.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if vm.webcamBackgroundStyle.mode != .off {
+                Picker("Quality", selection: Binding(
+                    get: { vm.webcamBackgroundStyle.qualityLevel },
+                    set: { var s = vm.webcamBackgroundStyle; s.qualityLevel = $0; vm.webcamBackgroundStyle = s }
+                )) {
+                    Text("Fast").tag(2)
+                    Text("Balanced").tag(1)
+                    Text("Accurate").tag(0)
+                }
+                .pickerStyle(.segmented)
+                Text("Fast keeps live preview smooth. Accurate gives cleaner hair edges but costs more per frame — fine during export, may stutter preview at retina.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    // MARK: - Cursor highlight section
+
+    @ViewBuilder
+    private func cursorHighlightSection(vm: EditorViewModel) -> some View {
+        @Bindable var vm = vm
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle("Cursor halo", isOn: Binding(
+                get: { vm.cursorHighlightStyle.enabled },
+                set: { var s = vm.cursorHighlightStyle; s.enabled = $0; vm.cursorHighlightStyle = s }
+            ))
+            .font(.headline)
+
+            if vm.project.cursorLog == nil {
+                Text("This recording was made before cursor tracking shipped — the halo needs per-frame cursor positions that aren't in the sidecar. Re-record to enable.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Soft always-on halo that follows the cursor. Useful for drawing attention during a walkthrough. Click ripples and the halo coexist — the ripple fires on top.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Text("Size").frame(width: 58, alignment: .leading)
+                    Slider(
+                        value: Binding(
+                            get: { vm.cursorHighlightStyle.radius },
+                            set: { var s = vm.cursorHighlightStyle; s.radius = $0; vm.cursorHighlightStyle = s }
+                        ),
+                        in: 20...200
+                    )
+                    Text("\(Int(vm.cursorHighlightStyle.radius)) px")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 58, alignment: .trailing)
+                }
+                HStack {
+                    Text("Opacity").frame(width: 58, alignment: .leading)
+                    Slider(
+                        value: Binding(
+                            get: { vm.cursorHighlightStyle.opacity },
+                            set: { var s = vm.cursorHighlightStyle; s.opacity = $0; vm.cursorHighlightStyle = s }
+                        ),
+                        in: 0.1...1.0
+                    )
+                    Text(String(format: "%.0f%%", vm.cursorHighlightStyle.opacity * 100))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 58, alignment: .trailing)
+                }
+                ColorPicker("Color", selection: Binding(
+                    get: {
+                        let s = vm.cursorHighlightStyle
+                        return Color(red: s.red, green: s.green, blue: s.blue)
+                    },
+                    set: { newColor in
+                        let nsColor = NSColor(newColor).usingColorSpace(.sRGB) ?? NSColor(newColor)
+                        var s = vm.cursorHighlightStyle
+                        s.red = nsColor.redComponent
+                        s.green = nsColor.greenComponent
+                        s.blue = nsColor.blueComponent
+                        vm.cursorHighlightStyle = s
+                    }
+                ))
+            }
+        }
+        .disabled(vm.isExporting)
+    }
+
+    // MARK: - Keystrokes overlay section
+
+    @ViewBuilder
+    private func keystrokesSection(vm: EditorViewModel) -> some View {
+        @Bindable var vm = vm
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Keystrokes").font(.headline)
+                Spacer()
+                Text("\(vm.keystrokeChips.count) event\(vm.keystrokeChips.count == 1 ? "" : "s")")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Toggle("Show keystroke overlay", isOn: Binding(
+                get: { vm.keystrokeOverlayStyle.enabled },
+                set: { var s = vm.keystrokeOverlayStyle; s.enabled = $0; vm.keystrokeOverlayStyle = s }
+            ))
+
+            Text("Renders each captured key press as a floating chip at the bottom of the frame — useful for software walkthroughs. Pulls from the recording's event log; nothing sent to the network.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Include plain keys (letters / symbols)", isOn: Binding(
+                get: { vm.keystrokeOverlayStyle.showPlainKeys },
+                set: { var s = vm.keystrokeOverlayStyle; s.showPlainKeys = $0; vm.keystrokeOverlayStyle = s }
+            ))
+            Text("Off by default so only modifier combos (⌘K, ⇧⇥) and special keys (Return, Tab, Esc, arrows) show. Turn on to render every key — can get busy during typing.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Text("Size").frame(width: 58, alignment: .leading)
+                Slider(
+                    value: Binding(
+                        get: { vm.keystrokeOverlayStyle.fontSizeFraction },
+                        set: { var s = vm.keystrokeOverlayStyle; s.fontSizeFraction = $0; vm.keystrokeOverlayStyle = s }
+                    ),
+                    in: 0.015...0.05
+                )
+                Text(String(format: "%.1f%%", vm.keystrokeOverlayStyle.fontSizeFraction * 100))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 44, alignment: .trailing)
+            }
+            HStack {
+                Text("Bottom").frame(width: 58, alignment: .leading)
+                Slider(
+                    value: Binding(
+                        get: { vm.keystrokeOverlayStyle.bottomInsetFraction },
+                        set: { var s = vm.keystrokeOverlayStyle; s.bottomInsetFraction = $0; vm.keystrokeOverlayStyle = s }
+                    ),
+                    in: 0.02...0.35
+                )
+                Text(String(format: "%.0f%%", vm.keystrokeOverlayStyle.bottomInsetFraction * 100))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 44, alignment: .trailing)
+            }
+            HStack {
+                Text("Hold").frame(width: 58, alignment: .leading)
+                Slider(
+                    value: Binding(
+                        get: { vm.keystrokeOverlayStyle.displayDuration },
+                        set: { var s = vm.keystrokeOverlayStyle; s.displayDuration = $0; vm.keystrokeOverlayStyle = s }
+                    ),
+                    in: 0.4...3.0
+                )
+                Text(String(format: "%.1fs", vm.keystrokeOverlayStyle.displayDuration))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 44, alignment: .trailing)
             }
         }
         .disabled(vm.isExporting)
@@ -768,8 +1083,49 @@ struct EditorView: View {
             Text("Balances the three audio sources in the preview and the exported MP4. 0 mutes, 1 is original volume, values above 1 amplify (watch for clipping).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            noiseReductionControls(vm: vm)
         }
         .disabled(vm.isExporting)
+    }
+
+    @ViewBuilder
+    private func noiseReductionControls(vm: EditorViewModel) -> some View {
+        @Bindable var vm = vm
+        HStack {
+            Toggle("Noise reduction", isOn: Binding(
+                get: { vm.noiseReductionStyle.enabled },
+                set: { var s = vm.noiseReductionStyle; s.enabled = $0; vm.noiseReductionStyle = s }
+            ))
+            .font(.subheadline.weight(.medium))
+            Spacer()
+            if vm.isCleaningMic {
+                ProgressView().controlSize(.small)
+            }
+        }
+
+        if vm.noiseReductionStyle.enabled {
+            HStack {
+                Text("Strength").frame(width: 70, alignment: .leading)
+                Picker("", selection: Binding(
+                    get: { vm.noiseReductionStyle.strength },
+                    set: { var s = vm.noiseReductionStyle; s.strength = $0; vm.noiseReductionStyle = s }
+                )) {
+                    ForEach(NoiseReductionStrength.allCases) { s in
+                        Text(s.label).tag(s)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+        }
+
+        Text("Offline high-pass (kills rumble / AC hum) + adaptive noise gate (learns the silence floor and mutes below it). Preview + export both use the cleaned audio. Regenerates whenever you switch strength.")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
@@ -1057,27 +1413,74 @@ private struct TimelineView: View {
             }
             .frame(height: trackHeight)
 
-            GeometryReader { geo in
-                zoomLane(width: geo.size.width)
+            // Secondary lanes — each one is conditional on the
+            // viewModel's effective visibility rule (user override +
+            // "has data" fallback). Hiding removes the row from the
+            // stack so the bottom controls lift up, no empty stripes.
+            if viewModel.isTimelineLaneVisible(.zoom) {
+                GeometryReader { geo in zoomLane(width: geo.size.width) }
+                    .frame(height: 18)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .frame(height: 18)
-
-            GeometryReader { geo in
-                talkingHeadLane(width: geo.size.width)
+            if viewModel.isTimelineLaneVisible(.talkingHead) {
+                GeometryReader { geo in talkingHeadLane(width: geo.size.width) }
+                    .frame(height: 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .frame(height: 14)
-
-            GeometryReader { geo in
-                cueLane(width: geo.size.width)
+            if viewModel.isTimelineLaneVisible(.soundboard) {
+                GeometryReader { geo in cueLane(width: geo.size.width) }
+                    .frame(height: 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .frame(height: 14)
-
-            GeometryReader { geo in
-                captionsLane(width: geo.size.width)
+            if viewModel.isTimelineLaneVisible(.captions) {
+                GeometryReader { geo in captionsLane(width: geo.size.width) }
+                    .frame(height: 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .frame(height: 14)
+            if viewModel.isTimelineLaneVisible(.keystrokes) {
+                GeometryReader { geo in keystrokesLane(width: geo.size.width) }
+                    .frame(height: 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             controls
+        }
+        .animation(
+            .easeInOut(duration: 0.18),
+            value: [
+                viewModel.isTimelineLaneVisible(.zoom),
+                viewModel.isTimelineLaneVisible(.talkingHead),
+                viewModel.isTimelineLaneVisible(.soundboard),
+                viewModel.isTimelineLaneVisible(.captions),
+                viewModel.isTimelineLaneVisible(.keystrokes)
+            ]
+        )
+    }
+
+    // MARK: Keystroke lane
+
+    @ViewBuilder
+    private func keystrokesLane(width: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.secondary.opacity(0.06))
+
+            // Each chip is a point-in-time event, like a soundboard
+            // cue. Render as a fixed-width yellow capsule so a burst
+            // of keystrokes reads as a cluster rather than one long
+            // bar. Width of 4pt keeps even a rapid ⌘S⌘Enter duo
+            // distinguishable.
+            ForEach(viewModel.keystrokeChips) { chip in
+                let x = xForTime(chip.time, width: width)
+                Capsule()
+                    .fill(Color.yellow.opacity(0.85))
+                    .frame(width: 4, height: 10)
+                    .offset(x: max(0, min(width - 4, x - 2)))
+                    .help("\(timeString(chip.time)): \(chip.label)")
+                    .onTapGesture {
+                        viewModel.seek(to: chip.time)
+                    }
+            }
         }
     }
 
@@ -1193,7 +1596,62 @@ private struct TimelineView: View {
                 .font(.caption.weight(.medium))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+            laneVisibilityMenu
+                .padding(.leading, 6)
         }
+    }
+
+    /// Popover-style menu that exposes per-lane Auto/Show/Hide state
+    /// plus global Show-all / Hide-all / Reset-to-Auto shortcuts. The
+    /// lane's current resolved visibility shows as a checkmark so the
+    /// user can tell at a glance what's on screen.
+    @ViewBuilder
+    private var laneVisibilityMenu: some View {
+        Menu {
+            ForEach(TimelineLane.allCases) { lane in
+                Menu {
+                    ForEach(LaneVisibility.allCases, id: \.self) { option in
+                        Button {
+                            var p = viewModel.timelineLanePrefs
+                            p[lane] = option
+                            viewModel.timelineLanePrefs = p
+                        } label: {
+                            if viewModel.timelineLanePrefs[lane] == option {
+                                Label(option.menuLabel, systemImage: "checkmark")
+                            } else {
+                                Text(option.menuLabel)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(lane.menuLabel)
+                        Spacer()
+                        if viewModel.isTimelineLaneVisible(lane) {
+                            Image(systemName: "eye")
+                        } else {
+                            Image(systemName: "eye.slash")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Show All Lanes") {
+                viewModel.timelineLanePrefs = viewModel.timelineLanePrefs.all(.show)
+            }
+            Button("Hide All Lanes") {
+                viewModel.timelineLanePrefs = viewModel.timelineLanePrefs.all(.hide)
+            }
+            Button("Reset to Auto") {
+                viewModel.timelineLanePrefs = viewModel.timelineLanePrefs.all(.auto)
+            }
+        } label: {
+            Image(systemName: "square.3.layers.3d.down.forward")
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 22)
+        .help("Choose which timeline lanes to show")
     }
 
     // MARK: Track

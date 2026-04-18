@@ -20,6 +20,11 @@ enum WebcamPosition: String, CaseIterable, Identifiable {
 enum WebcamShape: String, CaseIterable, Identifiable {
     case circle
     case roundedSquare
+    /// No shape mask — the full square webcam frame (or, when paired
+    /// with `WebcamBackgroundMode.transparent`, the raw person
+    /// silhouette) passes through. Useful for free-floating talking-
+    /// head compositions.
+    case none
 
     var id: String { rawValue }
 
@@ -27,16 +32,19 @@ enum WebcamShape: String, CaseIterable, Identifiable {
         switch self {
         case .circle:        return "Circle"
         case .roundedSquare: return "Rounded Square"
+        case .none:          return "No Shape"
         }
     }
 
     /// Corner-radius as a fraction of the shorter side length of the
     /// bounding square. Circle is exactly half (a full circle); the
-    /// rounded square uses a ~iOS-app-icon-like corner.
+    /// rounded square uses a ~iOS-app-icon-like corner. `.none`
+    /// reports 0 (no rounding — but it's also not drawn at all).
     private var cornerRadiusFactor: CGFloat {
         switch self {
         case .circle:        return 0.5
         case .roundedSquare: return 0.18
+        case .none:          return 0.0
         }
     }
 
@@ -57,6 +65,11 @@ enum WebcamShape: String, CaseIterable, Identifiable {
                 cornerHeight: r,
                 transform: nil
             )
+        case .none:
+            // Full square — used only when callers explicitly render
+            // a shape path (preview borders, etc.); the compositor
+            // skips the mask entirely when shape == .none.
+            return CGPath(rect: rect, transform: nil)
         }
     }
 }
@@ -95,6 +108,22 @@ final class Settings {
         static let editorAudioMixVolumes = "editorAudioMixVolumes"
         /// Last-used caption styling (font size, colors, position).
         static let captionStyle = "captionStyle"
+        /// Last-used keystroke overlay style (enable flag, size,
+        /// position, show-plain-keys toggle).
+        static let keystrokeOverlayStyle = "keystrokeOverlayStyle"
+        /// Last-used cursor highlight halo style (enable, radius,
+        /// color, opacity).
+        static let cursorHighlightStyle = "cursorHighlightStyle"
+        /// User-facing smart-zoom tuning knobs (scale, hold, sensitivity).
+        static let zoomTuning = "zoomTuning"
+        /// Webcam background mode (off / blur / color) + parameters.
+        static let webcamBackgroundStyle = "webcamBackgroundStyle"
+        /// Mic noise-reduction preference (enabled + strength preset).
+        static let noiseReductionStyle = "noiseReductionStyle"
+        /// Whether export writes a `.srt` sidecar alongside the MP4.
+        static let exportSRTSidecar = "exportSRTSidecar"
+        /// Per-lane timeline visibility overrides (auto/show/hide).
+        static let timelineLanePrefs = "timelineLanePrefs"
 
         // Live soundboard cues — shared across all recordings.
         static let soundboardCues = "soundboardCues"
@@ -116,7 +145,11 @@ final class Settings {
             Key.hideMenuBarIconWhenRecording: false,
             Key.showWebcamPreview: true,
             Key.editorSmartZoomEnabled: true,
-            Key.editorCursorRipplesEnabled: true
+            Key.editorCursorRipplesEnabled: true,
+            // Users who go to the trouble of generating captions
+            // almost always want a matching .srt for YouTube / Premiere /
+            // DaVinci. Default on; togglable per session.
+            Key.exportSRTSidecar: true
         ])
     }
 
@@ -250,6 +283,41 @@ final class Settings {
     var captionStyle: CaptionStyle? {
         get { readJSON(Key.captionStyle) }
         set { writeJSON(newValue, forKey: Key.captionStyle) }
+    }
+
+    var keystrokeOverlayStyle: KeystrokeOverlayStyle? {
+        get { readJSON(Key.keystrokeOverlayStyle) }
+        set { writeJSON(newValue, forKey: Key.keystrokeOverlayStyle) }
+    }
+
+    var cursorHighlightStyle: CursorHighlightStyle? {
+        get { readJSON(Key.cursorHighlightStyle) }
+        set { writeJSON(newValue, forKey: Key.cursorHighlightStyle) }
+    }
+
+    var zoomTuning: ZoomTuning? {
+        get { readJSON(Key.zoomTuning) }
+        set { writeJSON(newValue, forKey: Key.zoomTuning) }
+    }
+
+    var webcamBackgroundStyle: WebcamBackgroundStyle? {
+        get { readJSON(Key.webcamBackgroundStyle) }
+        set { writeJSON(newValue, forKey: Key.webcamBackgroundStyle) }
+    }
+
+    var noiseReductionStyle: NoiseReductionStyle? {
+        get { readJSON(Key.noiseReductionStyle) }
+        set { writeJSON(newValue, forKey: Key.noiseReductionStyle) }
+    }
+
+    var exportSRTSidecar: Bool {
+        get { defaults.bool(forKey: Key.exportSRTSidecar) }
+        set { defaults.set(newValue, forKey: Key.exportSRTSidecar); post() }
+    }
+
+    var timelineLanePrefs: TimelineLanePrefs? {
+        get { readJSON(Key.timelineLanePrefs) }
+        set { writeJSON(newValue, forKey: Key.timelineLanePrefs) }
     }
 
     /// Live soundboard cues. Never nil — defaults to an empty array.

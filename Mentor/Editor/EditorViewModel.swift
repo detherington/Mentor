@@ -394,6 +394,148 @@ final class EditorViewModel {
         }
     }
 
+    /// Keystroke-overlay chips generated from the event log at editor
+    /// load. Regenerated if `keystrokeOverlayStyle.showPlainKeys`
+    /// changes (the generator filters at generation time).
+    private(set) var keystrokeChips: [KeystrokeChip] = []
+
+    /// Persisted styling + enable flag for the keystroke overlay.
+    /// `didSet` regenerates chips when the plain-keys filter flips,
+    /// since the generator bakes that filter in.
+    var keystrokeOverlayStyle: KeystrokeOverlayStyle {
+        didSet {
+            if oldValue != keystrokeOverlayStyle {
+                Settings.shared.keystrokeOverlayStyle = keystrokeOverlayStyle
+                if oldValue.showPlainKeys != keystrokeOverlayStyle.showPlainKeys {
+                    keystrokeChips = KeystrokeOverlayGenerator.generate(
+                        from: project.eventLog,
+                        showPlainKeys: keystrokeOverlayStyle.showPlainKeys
+                    )
+                }
+                applyLayout()
+                registerUndoableChange(\.keystrokeOverlayStyle, from: oldValue,
+                                       actionName: "Change Keystrokes",
+                                       coalesceKey: "keystrokeOverlayStyle")
+            }
+        }
+    }
+
+    /// Interpolatable cursor-position track (generated from the
+    /// sidecar cursor.json at load time). `empty` for older recordings
+    /// that don't have a cursor sidecar.
+    private(set) var cursorTrack: CursorHighlightTrack = .empty
+
+    /// Write a `.srt` sidecar alongside the exported MP4 when the
+    /// recording has a transcription. Persisted — the user rarely
+    /// wants to flip this per-export, but we expose the toggle for
+    /// the rare "ship the MP4 without subs" case.
+    var exportSRTSidecar: Bool {
+        didSet {
+            if oldValue != exportSRTSidecar {
+                Settings.shared.exportSRTSidecar = exportSRTSidecar
+            }
+        }
+    }
+
+    /// Mic noise-reduction preference. When `enabled` flips on, we
+    /// run `MicCleaner` offline to produce `mic_cleaned.caf` in the
+    /// sidecar (only if the file doesn't already exist at the chosen
+    /// strength — we stamp the strength into the file's existence check
+    /// by regenerating on strength change), then rebuild the
+    /// composition so both preview + export use the cleaned track.
+    var noiseReductionStyle: NoiseReductionStyle {
+        didSet {
+            if oldValue != noiseReductionStyle {
+                Settings.shared.noiseReductionStyle = noiseReductionStyle
+                handleNoiseReductionChange(previous: oldValue)
+            }
+        }
+    }
+
+    /// True while `MicCleaner` is generating `mic_cleaned.caf`. Drives
+    /// a progress indicator in the inspector — the cleaner runs on a
+    /// detached task so UI stays responsive.
+    private(set) var isCleaningMic: Bool = false
+
+    /// Webcam background style (off / blur / color). Persisted so the
+    /// user's chosen mode + blur radius + colour follow them across
+    /// recordings. `didSet` re-applies the compositor state so the
+    /// preview updates live.
+    var webcamBackgroundStyle: WebcamBackgroundStyle {
+        didSet {
+            if oldValue != webcamBackgroundStyle {
+                Settings.shared.webcamBackgroundStyle = webcamBackgroundStyle
+                applyLayout()
+                registerUndoableChange(\.webcamBackgroundStyle, from: oldValue,
+                                       actionName: "Change Webcam Background",
+                                       coalesceKey: "webcamBackgroundStyle")
+            }
+        }
+    }
+
+    /// User-facing smart-zoom generator knobs (scale, hold, cluster
+    /// sensitivity). Persisted so reopens remember the user's feel.
+    /// `didSet` doesn't auto-regenerate — the user explicitly applies
+    /// via the "Regenerate from clicks" button so they can preview
+    /// slider movement before committing.
+    var zoomTuning: ZoomTuning {
+        didSet {
+            if oldValue != zoomTuning {
+                Settings.shared.zoomTuning = zoomTuning
+            }
+        }
+    }
+
+    /// Persisted styling + enable flag for the cursor halo overlay.
+    /// Purely visual; doesn't affect the raw recording.
+    var cursorHighlightStyle: CursorHighlightStyle {
+        didSet {
+            if oldValue != cursorHighlightStyle {
+                Settings.shared.cursorHighlightStyle = cursorHighlightStyle
+                applyLayout()
+                registerUndoableChange(\.cursorHighlightStyle, from: oldValue,
+                                       actionName: "Change Cursor Halo",
+                                       coalesceKey: "cursorHighlightStyle")
+            }
+        }
+    }
+
+    /// Per-lane visibility overrides. Purely a UI preference — doesn't
+    /// affect the baked export. Persisted so the user's chosen layout
+    /// follows them across recordings.
+    var timelineLanePrefs: TimelineLanePrefs {
+        didSet {
+            if oldValue != timelineLanePrefs {
+                Settings.shared.timelineLanePrefs = timelineLanePrefs
+            }
+        }
+    }
+
+    /// Effective visibility of a secondary timeline lane — combines
+    /// the user's stored override with a "has relevant content" rule.
+    func isTimelineLaneVisible(_ lane: TimelineLane) -> Bool {
+        switch lane {
+        case .zoom:
+            return resolve(timelineLanePrefs.zoom, auto: !zoomKeyframes.isEmpty)
+        case .talkingHead:
+            return resolve(timelineLanePrefs.talkingHead, auto: !talkingHeadKeyframes.isEmpty)
+        case .soundboard:
+            return resolve(timelineLanePrefs.soundboard, auto: !(project.soundboardLog?.events.isEmpty ?? true))
+        case .captions:
+            return resolve(timelineLanePrefs.captions, auto: !(transcription?.lines.isEmpty ?? true))
+        case .keystrokes:
+            return resolve(timelineLanePrefs.keystrokes, auto: keystrokeOverlayStyle.enabled)
+        }
+    }
+
+    private func resolve(_ override: LaneVisibility, auto: Bool) -> Bool {
+        switch override {
+        case .auto: return auto
+        case .show: return true
+        case .hide: return false
+        }
+    }
+
     /// Per-track audio volumes (mic / system / soundboard). Applied to
     /// both live preview (via `AVPlayerItem.audioMix`) and export (via
     /// `AVAssetReaderAudioMixOutput.audioMix`). Persisted.
@@ -440,7 +582,21 @@ final class EditorViewModel {
         self.exportQuality          = Settings.shared.exportQuality
         self.audioMixVolumes        = Settings.shared.editorAudioMixVolumes ?? .unity
         self.captionStyle           = Settings.shared.captionStyle ?? .default
+        self.keystrokeOverlayStyle  = Settings.shared.keystrokeOverlayStyle ?? .default
+        self.cursorHighlightStyle   = Settings.shared.cursorHighlightStyle ?? .default
+        self.zoomTuning             = Settings.shared.zoomTuning ?? .default
+        self.webcamBackgroundStyle  = Settings.shared.webcamBackgroundStyle ?? .default
+        self.noiseReductionStyle    = Settings.shared.noiseReductionStyle ?? .default
+        self.exportSRTSidecar       = Settings.shared.exportSRTSidecar
+        self.timelineLanePrefs      = Settings.shared.timelineLanePrefs ?? .default
         self.transcription          = project.transcription
+        // Build the interpolatable cursor track up-front so the
+        // compositor can do a single binary search per frame instead
+        // of traversing raw samples each time.
+        self.cursorTrack = CursorHighlightTrack.make(
+            from: project.cursorLog,
+            metadata: project.metadata
+        )
 
         // Load any previously-persisted talking-head moments. If no log
         // exists (fresh recording or pre-persistence bundle), we start
@@ -468,7 +624,12 @@ final class EditorViewModel {
             cursorRippleStyle: .default,
             talkingHeadKeyframes: [],
             transcriptionLines: transcription?.lines ?? [],
-            captionStyle: captionStyle
+            captionStyle: captionStyle,
+            keystrokeChips: [],
+            keystrokeOverlayStyle: keystrokeOverlayStyle,
+            cursorTrack: .empty,
+            cursorHighlightStyle: cursorHighlightStyle,
+            webcamBackgroundStyle: webcamBackgroundStyle
         )
 
         attachPlayerObservers()
@@ -491,11 +652,86 @@ final class EditorViewModel {
         player.replaceCurrentItem(with: nil)
     }
 
+    // MARK: - Noise reduction
+
+    /// URL of the cleaned mic file to feed into the composition, or
+    /// nil to pass through the raw `mic.m4a`. Nil when noise reduction
+    /// is disabled, or enabled-but-file-not-yet-generated (async
+    /// generation is in flight).
+    private func effectiveMicOverrideURL() -> URL? {
+        guard noiseReductionStyle.enabled else { return nil }
+        let url = project.bundle.cleanedMicAudioURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
+    /// Called from `noiseReductionStyle.didSet` when the user toggles
+    /// or switches strength. Decides whether we need to regenerate the
+    /// cleaned file + rebuild the composition.
+    private func handleNoiseReductionChange(previous: NoiseReductionStyle) {
+        let cleanedURL = project.bundle.cleanedMicAudioURL
+        let needsRegen: Bool = {
+            // Strength change invalidates the existing cleaned file —
+            // we don't stamp the strength into the file name, so we
+            // regenerate whenever the recipe shifts.
+            if noiseReductionStyle.enabled,
+               previous.strength != noiseReductionStyle.strength {
+                return true
+            }
+            // First time enabling on this recording — generate if
+            // missing.
+            if noiseReductionStyle.enabled,
+               !FileManager.default.fileExists(atPath: cleanedURL.path) {
+                return true
+            }
+            return false
+        }()
+
+        if needsRegen {
+            generateCleanedMic()
+        } else {
+            // Toggle without regen — just swap the composition to
+            // point at the (possibly now-inactive) cleaned file.
+            Task { await self.loadComposition() }
+        }
+    }
+
+    private func generateCleanedMic() {
+        guard !isCleaningMic else { return }
+        isCleaningMic = true
+        let inputURL = project.bundle.micAudioURL
+        let outputURL = project.bundle.cleanedMicAudioURL
+        let settings = noiseReductionStyle.strength.cleanerSettings
+        Task { [weak self] in
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try MicCleaner.clean(
+                        inputURL: inputURL,
+                        outputURL: outputURL,
+                        settings: settings
+                    )
+                }.value
+                MentorDebug.log("NR: cleaned mic written to \(outputURL.lastPathComponent)")
+            } catch {
+                MentorDebug.log("NR: cleaner failed: \(error.localizedDescription)")
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.isCleaningMic = false
+                Task { await self.loadComposition() }
+            }
+        }
+    }
+
     // MARK: - Composition loading
 
     private func loadComposition() async {
         do {
-            let result = try await EditorComposition.build(for: project)
+            let result = try await EditorComposition.build(
+                bundle: project.bundle,
+                metadata: project.metadata,
+                micOverride: effectiveMicOverrideURL()
+            )
             self.compositionResult = result
             let item = EditorComposition.makePlayerItem(from: result)
             // Apply initial audio mix (unity or last-used volumes).
@@ -531,6 +767,10 @@ final class EditorViewModel {
             self.cursorRipples = CursorRippleGenerator.generate(
                 from: project.eventLog,
                 metadata: project.metadata
+            )
+            self.keystrokeChips = KeystrokeOverlayGenerator.generate(
+                from: project.eventLog,
+                showPlainKeys: self.keystrokeOverlayStyle.showPlainKeys
             )
 
             // Auto-trim silence — before flipping isLoading so the
@@ -1164,7 +1404,12 @@ final class EditorViewModel {
             cursorRippleStyle: .default,
             talkingHeadKeyframes: talkingHeadKeyframes,
             transcriptionLines: transcription?.lines ?? [],
-            captionStyle: captionStyle
+            captionStyle: captionStyle,
+            keystrokeChips: keystrokeOverlayStyle.enabled ? keystrokeChips : [],
+            keystrokeOverlayStyle: keystrokeOverlayStyle,
+            cursorTrack: cursorHighlightStyle.enabled ? cursorTrack : .empty,
+            cursorHighlightStyle: cursorHighlightStyle,
+            webcamBackgroundStyle: webcamBackgroundStyle
         )
         // Keep cut-skipping in sync with the current cutRanges. Cheap
         // — O(cuts) observer install each call, and cut edits are low-
@@ -1455,7 +1700,7 @@ final class EditorViewModel {
             holdEndTime: holdEnd,
             outDuration: inOut,
             target: target,
-            scale: Self.defaultZoomScale
+            scale: zoomTuning.scale
         )
         let old = zoomKeyframes
         zoomKeyframes.append(kf)
@@ -1557,14 +1802,16 @@ final class EditorViewModel {
                                   coalesceKey: "zoomScale:\(id.uuidString)")
     }
 
-    /// Wipe persisted keyframes and regenerate from the click log.
+    /// Wipe persisted keyframes and regenerate from the click log,
+    /// using the user's current `zoomTuning` (scale, hold, sensitivity).
     /// Destructive — user explicitly confirms by clicking the button.
     func regenerateZoomFromClicks() {
         let old = zoomKeyframes
         zoomKeyframes = ZoomKeyframeGenerator.generate(
             from: project.eventLog,
             metadata: project.metadata,
-            duration: duration
+            duration: duration,
+            config: zoomTuning.config()
         )
         applyLayout()
         persistZoomLog()
@@ -1694,7 +1941,14 @@ final class EditorViewModel {
             videoBitrate: exportQuality.bitrate,
             audioMixVolumes: audioMixVolumes,
             transcriptionLines: transcription?.lines ?? [],
-            captionStyle: captionStyle
+            captionStyle: captionStyle,
+            keystrokeChips: keystrokeOverlayStyle.enabled ? keystrokeChips : [],
+            keystrokeOverlayStyle: keystrokeOverlayStyle,
+            cursorTrack: cursorHighlightStyle.enabled ? cursorTrack : .empty,
+            cursorHighlightStyle: cursorHighlightStyle,
+            webcamBackgroundStyle: webcamBackgroundStyle,
+            micOverrideURL: effectiveMicOverrideURL(),
+            writeSRTSidecar: exportSRTSidecar
         )
         let bundle = project.bundle
         let metadata = project.metadata

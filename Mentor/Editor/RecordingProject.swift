@@ -12,6 +12,7 @@ struct RecordingProject {
     let talkingHeadLog: TalkingHeadLog?
     let zoomLog: ZoomLog?
     let transcription: TranscriptionLog?
+    let cursorLog: CursorSampler.Log?
 
     var screenVideoURL: URL { bundleURL.appendingPathComponent("screen.mov") }
     var webcamVideoURL: URL { bundleURL.appendingPathComponent("webcam.mov") }
@@ -94,6 +95,12 @@ struct RecordingProject {
             transcription = try? decoder.decode(TranscriptionLog.self, from: data)
         }
 
+        var cursorLog: CursorSampler.Log? = nil
+        let cURL = bundleURL.appendingPathComponent("cursor.json")
+        if let data = try? Data(contentsOf: cURL) {
+            cursorLog = try? decoder.decode(CursorSampler.Log.self, from: data)
+        }
+
         // Sibling MP4: strip the .mentor extension and add .mp4.
         let stem = bundleURL.deletingPathExtension().lastPathComponent
         let finalMP4URL = bundleURL
@@ -108,7 +115,8 @@ struct RecordingProject {
             soundboardLog: soundboardLog,
             talkingHeadLog: talkingHeadLog,
             zoomLog: zoomLog,
-            transcription: transcription
+            transcription: transcription,
+            cursorLog: cursorLog
         )
     }
 }

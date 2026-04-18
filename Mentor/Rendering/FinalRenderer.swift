@@ -54,6 +54,34 @@ enum FinalRenderer {
         let transcriptionLines: [TranscriptionLine]
         let captionStyle: CaptionStyle
 
+        /// Keystroke overlay chips + styling. Empty chips or
+        /// `keystrokeOverlayStyle.enabled == false` → no overlay in the
+        /// export.
+        let keystrokeChips: [KeystrokeChip]
+        let keystrokeOverlayStyle: KeystrokeOverlayStyle
+
+        /// Cursor-highlight halo track + styling. Empty track or
+        /// `cursorHighlightStyle.enabled == false` → no halo baked in.
+        let cursorTrack: CursorHighlightTrack
+        let cursorHighlightStyle: CursorHighlightStyle
+
+        /// Webcam background processing (blur / color). Off → raw
+        /// webcam goes through unchanged.
+        let webcamBackgroundStyle: WebcamBackgroundStyle
+
+        /// Optional replacement URL for the mic track. When non-nil
+        /// and the file exists, the export composition uses this
+        /// instead of `bundle.micAudioURL` — noise-reduction cleaned
+        /// audio is fed in via this hook.
+        let micOverrideURL: URL?
+
+        /// When true and `transcriptionLines` is non-empty, the
+        /// renderer writes a `.srt` sidecar next to the exported MP4.
+        /// The SRT's timestamps are the post-trim, post-cut output
+        /// times so they line up with the MP4's timeline — not the
+        /// original recording's.
+        let writeSRTSidecar: Bool
+
         init(
             position: WebcamPosition,
             shape: WebcamShape,
@@ -69,7 +97,14 @@ enum FinalRenderer {
             videoBitrate: Int = ExportQuality.high.bitrate,
             audioMixVolumes: AudioMixBuilder.Volumes = .unity,
             transcriptionLines: [TranscriptionLine] = [],
-            captionStyle: CaptionStyle = .default
+            captionStyle: CaptionStyle = .default,
+            keystrokeChips: [KeystrokeChip] = [],
+            keystrokeOverlayStyle: KeystrokeOverlayStyle = .default,
+            cursorTrack: CursorHighlightTrack = .empty,
+            cursorHighlightStyle: CursorHighlightStyle = .default,
+            webcamBackgroundStyle: WebcamBackgroundStyle = .default,
+            micOverrideURL: URL? = nil,
+            writeSRTSidecar: Bool = false
         ) {
             self.position = position
             self.shape = shape
@@ -86,6 +121,13 @@ enum FinalRenderer {
             self.audioMixVolumes = audioMixVolumes
             self.transcriptionLines = transcriptionLines
             self.captionStyle = captionStyle
+            self.keystrokeChips = keystrokeChips
+            self.keystrokeOverlayStyle = keystrokeOverlayStyle
+            self.cursorTrack = cursorTrack
+            self.cursorHighlightStyle = cursorHighlightStyle
+            self.webcamBackgroundStyle = webcamBackgroundStyle
+            self.micOverrideURL = micOverrideURL
+            self.writeSRTSidecar = writeSRTSidecar
         }
 
         static func fromCaptureMetadata(_ metadata: RecordingMetadata) -> ExportLayout {
@@ -120,7 +162,11 @@ enum FinalRenderer {
         // Prime the compositor's shared state. NOTE: the compositor reads
         // this state per frame, so callers must avoid racing mutations
         // while a render is in flight.
-        let sourceComp = try await EditorComposition.build(bundle: bundle, metadata: metadata)
+        let sourceComp = try await EditorComposition.build(
+            bundle: bundle,
+            metadata: metadata,
+            micOverride: layout.micOverrideURL
+        )
         let effectiveMap = trimMap ?? .entire(CMTimeRange(start: .zero, duration: sourceComp.duration))
 
         // When the user has made interior cuts, stitch a new composition
@@ -139,6 +185,8 @@ enum FinalRenderer {
         let renderTalkingHeads: [TalkingHeadKeyframe]
         let renderRipples: [CursorRipple]
         let renderCaptions: [TranscriptionLine]
+        let renderKeystrokes: [KeystrokeChip]
+        let renderCursorTrack: CursorHighlightTrack
 
         if effectiveMap.cuts.isEmpty {
             composition = sourceComp
@@ -147,6 +195,8 @@ enum FinalRenderer {
             renderTalkingHeads = layout.talkingHeadKeyframes
             renderRipples = layout.cursorRipples
             renderCaptions = layout.transcriptionLines
+            renderKeystrokes = layout.keystrokeChips
+            renderCursorTrack = layout.cursorTrack
         } else {
             composition = try EditorComposition.stitched(source: sourceComp, trimMap: effectiveMap)
             compositorMap = .entire(CMTimeRange(start: .zero, duration: composition.duration))
@@ -154,6 +204,8 @@ enum FinalRenderer {
             renderTalkingHeads = effectiveMap.remap(talkingHeadKeyframes: layout.talkingHeadKeyframes)
             renderRipples = effectiveMap.remap(cursorRipples: layout.cursorRipples)
             renderCaptions = effectiveMap.remap(transcriptionLines: layout.transcriptionLines)
+            renderKeystrokes = effectiveMap.remap(keystrokeChips: layout.keystrokeChips)
+            renderCursorTrack = effectiveMap.remap(cursorTrack: layout.cursorTrack)
         }
 
         LiveCompositor.state.update(
@@ -170,7 +222,12 @@ enum FinalRenderer {
             cursorRippleStyle: layout.cursorRippleStyle,
             talkingHeadKeyframes: renderTalkingHeads,
             transcriptionLines: renderCaptions,
-            captionStyle: layout.captionStyle
+            captionStyle: layout.captionStyle,
+            keystrokeChips: renderKeystrokes,
+            keystrokeOverlayStyle: layout.keystrokeOverlayStyle,
+            cursorTrack: renderCursorTrack,
+            cursorHighlightStyle: layout.cursorHighlightStyle,
+            webcamBackgroundStyle: layout.webcamBackgroundStyle
         )
         let audioMix = AudioMixBuilder.build(
             composition: composition.composition,
@@ -187,7 +244,7 @@ enum FinalRenderer {
             ? effectiveMap
             : compositorMap
 
-        return try await writeComposition(
+        let writtenURL = try await writeComposition(
             composition: composition.composition,
             videoComposition: composition.videoComposition,
             duration: composition.duration,
@@ -201,6 +258,29 @@ enum FinalRenderer {
             outputURL: outputURL,
             progress: progress
         )
+
+        // Sidecar SRT — only if asked AND there's actually a
+        // transcription to emit. Always run source→output remap so
+        // the timestamps line up with the MP4 regardless of whether
+        // we took the stitched or straight-reader path above.
+        if layout.writeSRTSidecar, !layout.transcriptionLines.isEmpty {
+            let srtLines = effectiveMap.remap(transcriptionLines: layout.transcriptionLines)
+            if !srtLines.isEmpty {
+                let srtURL = writtenURL
+                    .deletingPathExtension()
+                    .appendingPathExtension("srt")
+                let srtBody = SRTFormatter.format(lines: srtLines)
+                do {
+                    try srtBody.write(to: srtURL, atomically: true, encoding: .utf8)
+                    MentorDebug.log("EXPORT: wrote SRT sidecar \(srtURL.lastPathComponent) (\(srtLines.count) cues)")
+                } catch {
+                    // Non-fatal — the MP4 is already on disk.
+                    MentorDebug.log("EXPORT: SRT sidecar write failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        return writtenURL
     }
 
     @discardableResult
