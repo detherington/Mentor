@@ -11,6 +11,7 @@ struct RecordingProject {
     let soundboardLog: SoundboardEventLog?
     let talkingHeadLog: TalkingHeadLog?
     let zoomLog: ZoomLog?
+    let transcription: TranscriptionLog?
 
     var screenVideoURL: URL { bundleURL.appendingPathComponent("screen.mov") }
     var webcamVideoURL: URL { bundleURL.appendingPathComponent("webcam.mov") }
@@ -18,6 +19,7 @@ struct RecordingProject {
     var soundboardEventsURL: URL { bundleURL.appendingPathComponent("soundboard-events.json") }
     var talkingHeadURL: URL { bundleURL.appendingPathComponent("talking-head.json") }
     var zoomURL: URL { bundleURL.appendingPathComponent("zoom.json") }
+    var transcriptionURL: URL { bundleURL.appendingPathComponent("transcription.json") }
     var metadataURL: URL { bundleURL.appendingPathComponent("metadata.json") }
 
     var displayName: String {
@@ -86,6 +88,12 @@ struct RecordingProject {
             zoomLog = try? decoder.decode(ZoomLog.self, from: data)
         }
 
+        var transcription: TranscriptionLog? = nil
+        let tURL = bundleURL.appendingPathComponent("transcription.json")
+        if let data = try? Data(contentsOf: tURL) {
+            transcription = try? decoder.decode(TranscriptionLog.self, from: data)
+        }
+
         // Sibling MP4: strip the .mentor extension and add .mp4.
         let stem = bundleURL.deletingPathExtension().lastPathComponent
         let finalMP4URL = bundleURL
@@ -99,7 +107,8 @@ struct RecordingProject {
             eventLog: log,
             soundboardLog: soundboardLog,
             talkingHeadLog: talkingHeadLog,
-            zoomLog: zoomLog
+            zoomLog: zoomLog,
+            transcription: transcription
         )
     }
 }

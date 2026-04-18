@@ -93,6 +93,8 @@ final class Settings {
         static let exportQuality = "exportQuality"
         /// Per-track mix volumes used in the editor + baked into export.
         static let editorAudioMixVolumes = "editorAudioMixVolumes"
+        /// Last-used caption styling (font size, colors, position).
+        static let captionStyle = "captionStyle"
 
         // Live soundboard cues — shared across all recordings.
         static let soundboardCues = "soundboardCues"
@@ -243,6 +245,11 @@ final class Settings {
     var editorAudioMixVolumes: AudioMixBuilder.Volumes? {
         get { readJSON(Key.editorAudioMixVolumes) }
         set { writeJSON(newValue, forKey: Key.editorAudioMixVolumes) }
+    }
+
+    var captionStyle: CaptionStyle? {
+        get { readJSON(Key.captionStyle) }
+        set { writeJSON(newValue, forKey: Key.captionStyle) }
     }
 
     /// Live soundboard cues. Never nil — defaults to an empty array.

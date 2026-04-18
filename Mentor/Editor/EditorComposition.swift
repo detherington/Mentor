@@ -170,5 +170,103 @@ enum EditorComposition {
         item.videoComposition = result.videoComposition
         return item
     }
+
+    /// Build a new `Result` that represents only the kept ranges of
+    /// `source` under `trimMap` — the outer trim plus interior cuts
+    /// excised. Returns `source` unchanged if `trimMap` is trivial.
+    ///
+    /// Used by the exporter when the user's TrimMap contains interior
+    /// cuts: the stitched composition has duration
+    /// `trimMap.outputDuration`, its frames arrive in output-time, and
+    /// the existing reader/writer pipeline runs over it without any
+    /// `reader.timeRange` trimming.
+    ///
+    /// Each source track in `source.composition` gets a matching track
+    /// in the stitched composition, with each `trimMap.keptRanges`
+    /// segment appended in order. Track IDs in the new composition are
+    /// fresh; we return a fully-populated `Result` so callers can keep
+    /// building audio mixes against them.
+    static func stitched(source: Result, trimMap: TrimMap) throws -> Result {
+        guard !trimMap.cuts.isEmpty else { return source }
+
+        let stitched = AVMutableComposition()
+
+        func copyKeptRanges(
+            from sourceTrack: AVCompositionTrack,
+            mediaType: AVMediaType,
+            ranges: [CMTimeRange]
+        ) throws -> CMPersistentTrackID {
+            guard let newTrack = stitched.addMutableTrack(
+                withMediaType: mediaType,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                throw Error.cannotAddTrack(mediaType.rawValue)
+            }
+            var cursor: CMTime = .zero
+            for range in ranges {
+                try newTrack.insertTimeRange(range, of: sourceTrack, at: cursor)
+                cursor = CMTimeAdd(cursor, range.duration)
+            }
+            return newTrack.trackID
+        }
+
+        // Screen video: required.
+        guard let srcScreenTrack = source.composition.track(withTrackID: source.screenTrackID) else {
+            throw Error.missingScreenTrack
+        }
+        let screenID = try copyKeptRanges(
+            from: srcScreenTrack,
+            mediaType: .video,
+            ranges: trimMap.keptRanges
+        )
+
+        // Webcam video: optional.
+        var webcamID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
+        if source.webcamTrackID != kCMPersistentTrackID_Invalid,
+           let src = source.composition.track(withTrackID: source.webcamTrackID) {
+            webcamID = try copyKeptRanges(from: src, mediaType: .video, ranges: trimMap.keptRanges)
+        }
+
+        // Audio tracks — preserve per-track identity so the audio mix
+        // survives through the stitch.
+        func copyAudioIfPresent(_ id: CMPersistentTrackID) throws -> CMPersistentTrackID {
+            guard id != kCMPersistentTrackID_Invalid,
+                  let src = source.composition.track(withTrackID: id) else {
+                return kCMPersistentTrackID_Invalid
+            }
+            return try copyKeptRanges(from: src, mediaType: .audio, ranges: trimMap.keptRanges)
+        }
+        let micID = try copyAudioIfPresent(source.micTrackID)
+        let systemID = try copyAudioIfPresent(source.systemTrackID)
+        let soundboardID = try copyAudioIfPresent(source.soundboardTrackID)
+
+        // New video composition that spans the stitched duration.
+        let stitchedDuration = trimMap.outputDuration
+        let renderSize = source.videoComposition.renderSize
+        let newVideoComp = AVMutableVideoComposition()
+        newVideoComp.renderSize = renderSize
+        newVideoComp.frameDuration = source.videoComposition.frameDuration
+        newVideoComp.customVideoCompositorClass = LiveCompositor.self
+        newVideoComp.instructions = [
+            LiveCompositor.Instruction(
+                timeRange: CMTimeRange(start: .zero, duration: stitchedDuration),
+                screenTrackID: screenID,
+                webcamTrackID: webcamID
+            )
+        ]
+
+        MentorDebug.log("COMPOSE: stitched — \(trimMap.keptRanges.count) segments, duration=\(CMTimeGetSeconds(stitchedDuration))s")
+
+        return Result(
+            composition: stitched,
+            videoComposition: newVideoComp,
+            duration: stitchedDuration,
+            screenTrackID: screenID,
+            webcamTrackID: webcamID,
+            micTrackID: micID,
+            systemTrackID: systemID,
+            soundboardTrackID: soundboardID
+        )
+    }
 }
 

@@ -48,6 +48,11 @@ enum FinalRenderer {
         /// Per-track volumes applied via `AVAudioMix` at export time.
         /// Unity preserves the original recording mix.
         let audioMixVolumes: AudioMixBuilder.Volumes
+        /// Subtitle lines + styling. Empty `transcriptionLines` or
+        /// `captionStyle.enabled == false` → no captions baked into the
+        /// export.
+        let transcriptionLines: [TranscriptionLine]
+        let captionStyle: CaptionStyle
 
         init(
             position: WebcamPosition,
@@ -62,7 +67,9 @@ enum FinalRenderer {
             cursorRippleStyle: CursorRippleStyle = .default,
             talkingHeadKeyframes: [TalkingHeadKeyframe] = [],
             videoBitrate: Int = ExportQuality.high.bitrate,
-            audioMixVolumes: AudioMixBuilder.Volumes = .unity
+            audioMixVolumes: AudioMixBuilder.Volumes = .unity,
+            transcriptionLines: [TranscriptionLine] = [],
+            captionStyle: CaptionStyle = .default
         ) {
             self.position = position
             self.shape = shape
@@ -77,6 +84,8 @@ enum FinalRenderer {
             self.talkingHeadKeyframes = talkingHeadKeyframes
             self.videoBitrate = videoBitrate
             self.audioMixVolumes = audioMixVolumes
+            self.transcriptionLines = transcriptionLines
+            self.captionStyle = captionStyle
         }
 
         static func fromCaptureMetadata(_ metadata: RecordingMetadata) -> ExportLayout {
@@ -104,28 +113,64 @@ enum FinalRenderer {
         bundle: RecordingBundle,
         metadata: RecordingMetadata,
         layout: ExportLayout,
-        trimRange: CMTimeRange? = nil,
+        trimMap: TrimMap? = nil,
         outputURL: URL,
         progress: ((Float) -> Void)? = nil
     ) async throws -> URL {
         // Prime the compositor's shared state. NOTE: the compositor reads
         // this state per frame, so callers must avoid racing mutations
         // while a render is in flight.
-        let composition = try await EditorComposition.build(bundle: bundle, metadata: metadata)
-        let outRange = trimRange ?? CMTimeRange(start: .zero, duration: composition.duration)
+        let sourceComp = try await EditorComposition.build(bundle: bundle, metadata: metadata)
+        let effectiveMap = trimMap ?? .entire(CMTimeRange(start: .zero, duration: sourceComp.duration))
+
+        // When the user has made interior cuts, stitch a new composition
+        // whose duration already reflects only the kept segments. The
+        // downstream reader/writer pipeline then runs in "output time"
+        // throughout — no reader.timeRange trimming needed, and the
+        // compositor sees frames at their final output PTS.
+        //
+        // Keyframes, captions and cursor ripples live in source time, so
+        // they get remapped through the TrimMap before being handed to
+        // the compositor. The compositor itself treats the incoming
+        // trimMap as an identity span over `stitchedDuration`.
+        let composition: EditorComposition.Result
+        let compositorMap: TrimMap
+        let renderKeyframes: [ZoomKeyframe]
+        let renderTalkingHeads: [TalkingHeadKeyframe]
+        let renderRipples: [CursorRipple]
+        let renderCaptions: [TranscriptionLine]
+
+        if effectiveMap.cuts.isEmpty {
+            composition = sourceComp
+            compositorMap = effectiveMap
+            renderKeyframes = layout.zoomKeyframes
+            renderTalkingHeads = layout.talkingHeadKeyframes
+            renderRipples = layout.cursorRipples
+            renderCaptions = layout.transcriptionLines
+        } else {
+            composition = try EditorComposition.stitched(source: sourceComp, trimMap: effectiveMap)
+            compositorMap = .entire(CMTimeRange(start: .zero, duration: composition.duration))
+            renderKeyframes = effectiveMap.remap(zoomKeyframes: layout.zoomKeyframes)
+            renderTalkingHeads = effectiveMap.remap(talkingHeadKeyframes: layout.talkingHeadKeyframes)
+            renderRipples = effectiveMap.remap(cursorRipples: layout.cursorRipples)
+            renderCaptions = effectiveMap.remap(transcriptionLines: layout.transcriptionLines)
+        }
+
         LiveCompositor.state.update(
             position: layout.position,
             shape: layout.shape,
             diameter: layout.diameterPixels,
             inset: layout.insetPixels,
-            zoomKeyframes: layout.zoomKeyframes,
+            zoomKeyframes: renderKeyframes,
             webcamTransitions: layout.webcamTransitions,
             startCard: layout.startCard,
             endCard: layout.endCard,
-            outputRange: outRange,
-            cursorRipples: layout.cursorRipples,
+            trimMap: compositorMap,
+            cursorRipples: renderRipples,
             cursorRippleStyle: layout.cursorRippleStyle,
-            talkingHeadKeyframes: layout.talkingHeadKeyframes
+            talkingHeadKeyframes: renderTalkingHeads,
+            transcriptionLines: renderCaptions,
+            captionStyle: layout.captionStyle
         )
         let audioMix = AudioMixBuilder.build(
             composition: composition.composition,
@@ -135,6 +180,13 @@ enum FinalRenderer {
             volumes: layout.audioMixVolumes
         )
 
+        // Once stitched, there are no interior cuts left in the asset —
+        // the reader runs over the full stitched duration. For the non-
+        // stitched path we still honour the outer trim via trimMap.
+        let readerMap: TrimMap = effectiveMap.cuts.isEmpty
+            ? effectiveMap
+            : compositorMap
+
         return try await writeComposition(
             composition: composition.composition,
             videoComposition: composition.videoComposition,
@@ -143,7 +195,7 @@ enum FinalRenderer {
                 width: metadata.compositedPixelSize.width,
                 height: metadata.compositedPixelSize.height
             ),
-            trimRange: trimRange,
+            trimMap: readerMap,
             videoBitrate: layout.videoBitrate,
             audioMix: audioMix,
             outputURL: outputURL,
@@ -225,7 +277,7 @@ enum FinalRenderer {
         videoComposition: AVMutableVideoComposition,
         duration: CMTime,
         outputSize: CGSize,
-        trimRange: CMTimeRange? = nil,
+        trimMap: TrimMap? = nil,
         videoBitrate: Int = ExportQuality.high.bitrate,
         audioMix: AVAudioMix? = nil,
         outputURL: URL,
@@ -233,8 +285,11 @@ enum FinalRenderer {
     ) async throws -> URL {
         try? FileManager.default.removeItem(at: outputURL)
 
-        // Effective source time range — either the trim, or the full duration.
-        let sourceRange: CMTimeRange = trimRange ?? CMTimeRange(start: .zero, duration: duration)
+        // Effective source time range — either the outer trim, or the full
+        // duration. NOTE: interior cuts (when present) are handled by
+        // stitching a new composition upstream; at this layer we only
+        // care about the outer range.
+        let sourceRange: CMTimeRange = trimMap?.outerTrim ?? CMTimeRange(start: .zero, duration: duration)
         let sessionStart = sourceRange.start
 
         // ---- Reader

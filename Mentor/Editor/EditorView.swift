@@ -110,6 +110,20 @@ struct EditorView: View {
                 }
                 return .handled
             }
+            // Esc — drop any in-progress range selection.
+            if press.key == .escape, vm.selectionRange != nil {
+                vm.clearSelection()
+                return .handled
+            }
+            // ⌫ — when a selection is active, cut it. Otherwise fall
+            // through so other delete handlers (e.g. on focused
+            // keyframe rows) still work.
+            if press.key == .delete || press.key == .deleteForward {
+                if vm.selectionRange != nil {
+                    vm.cutSelection()
+                    return .handled
+                }
+            }
             return .ignored
         }
     }
@@ -208,6 +222,14 @@ struct EditorView: View {
                 Divider()
 
                 audioMixSection(vm: vm)
+
+                Divider()
+
+                captionsSection(vm: vm)
+
+                Divider()
+
+                cutsSection(vm: vm)
 
                 Divider()
 
@@ -401,6 +423,201 @@ struct EditorView: View {
                     .frame(width: 42, alignment: .trailing)
             }
         }
+    }
+
+    // MARK: - Captions section
+
+    @ViewBuilder
+    private func captionsSection(vm: EditorViewModel) -> some View {
+        @Bindable var vm = vm
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Captions").font(.headline)
+                Spacer()
+                if vm.isTranscribing {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let log = vm.transcription {
+                Toggle("Show captions", isOn: Binding(
+                    get: { vm.captionStyle.enabled },
+                    set: { var s = vm.captionStyle; s.enabled = $0; vm.captionStyle = s }
+                ))
+
+                Text("\(log.lines.count) line\(log.lines.count == 1 ? "" : "s") transcribed on-device (\(log.locale)).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("Size")
+                        .frame(width: 52, alignment: .leading)
+                    Slider(
+                        value: Binding(
+                            get: { vm.captionStyle.fontSizeFraction },
+                            set: { var s = vm.captionStyle; s.fontSizeFraction = $0; vm.captionStyle = s }
+                        ),
+                        in: 0.025...0.08
+                    )
+                    Text(String(format: "%.1f%%", vm.captionStyle.fontSizeFraction * 100))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 44, alignment: .trailing)
+                }
+                HStack {
+                    Text("Bottom")
+                        .frame(width: 52, alignment: .leading)
+                    Slider(
+                        value: Binding(
+                            get: { vm.captionStyle.bottomInsetFraction },
+                            set: { var s = vm.captionStyle; s.bottomInsetFraction = $0; vm.captionStyle = s }
+                        ),
+                        in: 0.01...0.3
+                    )
+                    Text(String(format: "%.0f%%", vm.captionStyle.bottomInsetFraction * 100))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 44, alignment: .trailing)
+                }
+
+                HStack(spacing: 6) {
+                    Button {
+                        vm.generateCaptions()
+                    } label: {
+                        Label("Regenerate", systemImage: "waveform")
+                    }
+                    .controlSize(.small)
+                    .disabled(vm.isTranscribing)
+
+                    Button(role: .destructive) {
+                        vm.clearCaptions()
+                    } label: {
+                        Label("Clear", systemImage: "trash")
+                    }
+                    .controlSize(.small)
+                    .disabled(vm.isTranscribing)
+                }
+            } else {
+                Text("Transcribe your narration on-device to burn subtitles into the exported MP4. First run prompts for Speech Recognition permission.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    vm.generateCaptions()
+                } label: {
+                    Label("Generate from mic", systemImage: "waveform")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.regular)
+                .disabled(vm.isTranscribing)
+            }
+
+            if let err = vm.transcriptionError {
+                Text(err.localizedDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // macOS 26 has a quirk where on-device
+                // SFSpeechURLRecognitionRequest can return empty even
+                // when Dictation works. Offer an explicit cloud retry.
+                if vm.transcriptionErrorIsNoSpeech {
+                    Button {
+                        vm.generateCaptions(allowCloudFallback: true)
+                    } label: {
+                        Label("Retry via Apple's cloud", systemImage: "icloud.and.arrow.up")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.small)
+                    .disabled(vm.isTranscribing)
+                    Text("Sends this recording's audio to Apple for speech recognition. Only for this one request.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .disabled(vm.isExporting)
+    }
+
+    // MARK: - Cuts section (ripple-delete middle regions)
+
+    @ViewBuilder
+    private func cutsSection(vm: EditorViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Cuts").font(.headline)
+                Spacer()
+                if !vm.cutRanges.isEmpty {
+                    Button(role: .destructive) {
+                        vm.clearCuts()
+                    } label: {
+                        Text("Clear all")
+                    }
+                    .controlSize(.small)
+                }
+            }
+
+            if vm.cutRanges.isEmpty {
+                Text("Select a range on the timeline (⇧I to mark start, scrub, ⇧O to cut) to ripple-delete a section from the output. Keyframes + captions shift to cover the gap.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("\(vm.cutRanges.count) cut\(vm.cutRanges.count == 1 ? "" : "s") — \(cutTotalString(vm: vm)) removed. Output duration: \(outputDurationString(vm: vm)).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: 4) {
+                    ForEach(Array(vm.cutRanges.enumerated()), id: \.offset) { idx, range in
+                        HStack(spacing: 6) {
+                            Image(systemName: "scissors")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                            Text(cutRangeString(range))
+                                .font(.caption.monospacedDigit())
+                            Spacer()
+                            Button {
+                                vm.seek(to: range.start)
+                            } label: {
+                                Image(systemName: "arrow.right.to.line.compact")
+                            }
+                            .buttonStyle(.plain)
+                            .help("Jump to cut start")
+                            Button(role: .destructive) {
+                                vm.removeCut(at: idx)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.plain)
+                            .help("Restore this cut")
+                        }
+                        .padding(.vertical, 2)
+                        .padding(.horizontal, 6)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+                    }
+                }
+            }
+        }
+        .disabled(vm.isExporting)
+    }
+
+    private func cutTotalString(vm: EditorViewModel) -> String {
+        let total = vm.cutRanges.reduce(CMTime.zero) { CMTimeAdd($0, $1.duration) }
+        let secs = CMTimeGetSeconds(total)
+        return secs.isFinite ? String(format: "%.1fs", secs) : "--"
+    }
+
+    private func outputDurationString(vm: EditorViewModel) -> String {
+        let secs = CMTimeGetSeconds(vm.trimMap.outputDuration)
+        return secs.isFinite ? String(format: "%.1fs", secs) : "--"
+    }
+
+    private func cutRangeString(_ range: CMTimeRange) -> String {
+        let s = CMTimeGetSeconds(range.start)
+        let e = CMTimeGetSeconds(range.end)
+        let d = CMTimeGetSeconds(range.duration)
+        guard s.isFinite, e.isFinite, d.isFinite else { return "--" }
+        return String(format: "%.2fs → %.2fs  (%.2fs)", s, e, d)
     }
 
     // MARK: - Audio mix section
@@ -894,6 +1111,49 @@ private struct TimelineView: View {
                 .frame(width: max(0, width - endX))
                 .offset(x: endX)
 
+            // Interior cuts — rendered as dark hatched regions so they
+            // read as "not in the output". Drawn ABOVE the active-trim
+            // highlight but BELOW the seek layer + handles.
+            ForEach(Array(viewModel.cutRanges.enumerated()), id: \.offset) { _, cut in
+                let a = xForTime(cut.start, width: width)
+                let b = xForTime(cut.end, width: width)
+                ZStack {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.55))
+                    // Diagonal hatch lines in a subtle tint so the
+                    // region reads as "cut" even without color.
+                    GeometryReader { geo in
+                        let size = geo.size
+                        let step: CGFloat = 6
+                        Path { p in
+                            var x: CGFloat = -size.height
+                            while x < size.width + size.height {
+                                p.move(to: CGPoint(x: x, y: size.height))
+                                p.addLine(to: CGPoint(x: x + size.height, y: 0))
+                                x += step
+                            }
+                        }
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    }
+                }
+                .frame(width: max(0, b - a), height: trackHeight)
+                .offset(x: a)
+                .allowsHitTesting(false)
+            }
+
+            // Active range selection — drawn as an orange wash so it's
+            // clearly distinct from trim + cuts. Only visible while the
+            // user has hit "Mark" and is scrubbing.
+            if let sel = viewModel.selectionRange {
+                let a = xForTime(sel.start, width: width)
+                let b = xForTime(sel.end, width: width)
+                Rectangle()
+                    .fill(Color.orange.opacity(0.4))
+                    .frame(width: max(0, b - a), height: trackHeight)
+                    .offset(x: a)
+                    .allowsHitTesting(false)
+            }
+
             // Click/drag-to-seek layer (below handles)
             Color.clear
                 .contentShape(Rectangle())
@@ -1002,6 +1262,25 @@ private struct TimelineView: View {
                 Label("Auto-trim", systemImage: "waveform.path.ecg")
             }
             .help("Re-run silence detection on the mic track")
+
+            Divider().frame(height: 16)
+
+            Button {
+                viewModel.markSelectionStart()
+            } label: {
+                Label("Mark", systemImage: "flag")
+            }
+            .keyboardShortcut("i", modifiers: .shift)
+            .help("Anchor a selection at the playhead (⇧I)")
+
+            Button {
+                viewModel.cutSelection()
+            } label: {
+                Label("Cut", systemImage: "scissors")
+            }
+            .keyboardShortcut("o", modifiers: .shift)
+            .disabled(viewModel.selectionRange == nil)
+            .help("Delete selected range (⇧O) — ripples timeline + keyframes")
 
             Spacer()
         }

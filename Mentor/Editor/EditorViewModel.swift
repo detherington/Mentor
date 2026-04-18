@@ -28,6 +28,40 @@ final class EditorViewModel {
     private(set) var trimStart: CMTime = .zero
     private(set) var trimEnd: CMTime = .zero
 
+    /// Interior cut ranges — regions in source-composition time that have
+    /// been excised from the middle of the recording. Sorted, non-
+    /// overlapping, strictly inside `[trimStart, trimEnd]`. Mutated via
+    /// `insertCut` / `removeCut` / `clearCuts`; use `trimMap` (computed
+    /// below) for any read that needs to know the kept ranges.
+    private(set) var cutRanges: [CMTimeRange] = []
+
+    /// Derived view of trim + cuts — the editor's single source of truth
+    /// for "what's in the output timeline". Built fresh on every read;
+    /// TrimMap's initializer re-normalises defensively so this is always
+    /// valid even if the inputs drift.
+    var trimMap: TrimMap {
+        TrimMap(outerTrim: trimRange, cuts: cutRanges)
+    }
+
+    /// Anchor for an in-progress range selection. When non-nil, the
+    /// selection runs between this point and `currentTime` (order-
+    /// independent). Used by the cut workflow: user hits "Mark" here,
+    /// scrubs to the other end, hits "Cut".
+    var selectionStart: CMTime?
+
+    /// Convenience: normalised range from `selectionStart` to
+    /// `currentTime`, or nil if no mark is set. Clamped to the outer
+    /// trim so you can't select into already-trimmed regions.
+    var selectionRange: CMTimeRange? {
+        guard let anchor = selectionStart, duration > .zero else { return nil }
+        let a = clamp(anchor, lower: trimStart, upper: trimEnd)
+        let b = clamp(currentTime, lower: trimStart, upper: trimEnd)
+        let lo = CMTimeCompare(a, b) <= 0 ? a : b
+        let hi = CMTimeCompare(a, b) <= 0 ? b : a
+        guard CMTimeCompare(hi, lo) > 0 else { return nil }
+        return CMTimeRange(start: lo, end: hi)
+    }
+
     // Export state
     private(set) var isExporting = false
     private(set) var exportProgress: Float = 0
@@ -39,6 +73,10 @@ final class EditorViewModel {
     // so deinit can reference them without @MainActor hops).
     nonisolated(unsafe) private var timeObserverToken: Any?
     nonisolated(unsafe) private var rateObservation: NSKeyValueObservation?
+    /// Boundary observers that seek past each interior cut during
+    /// playback. Rebuilt whenever `cutRanges` changes via
+    /// `refreshCutBoundaryObservers()`. One token per observer registration.
+    nonisolated(unsafe) private var cutBoundaryTokens: [Any] = []
 
     // Editable overlay parameters. `didSet` writes through to the compositor's
     // shared state and nudges the player to redraw if paused.
@@ -314,6 +352,41 @@ final class EditorViewModel {
         }
     }
 
+    /// Burned-in captions for the mic track. Starts nil until the user
+    /// either opens a bundle that already has a `transcription.json` or
+    /// runs `generateCaptions()`.
+    private(set) var transcription: TranscriptionLog?
+    /// True while `generateCaptions()` is running; drives the spinner /
+    /// disabled state in the inspector.
+    private(set) var isTranscribing: Bool = false
+    /// Surface the last transcription error to the inspector so the user
+    /// can see why generation failed (permission denied, on-device
+    /// model unavailable, etc).
+    var transcriptionError: (any Error)?
+
+    /// True iff the last failure was specifically "no speech detected" —
+    /// the case where we might usefully retry with cloud fallback
+    /// enabled. Drives visibility of the cloud-retry button in the
+    /// inspector.
+    var transcriptionErrorIsNoSpeech: Bool {
+        guard let err = transcriptionError as? CaptionTranscriber.TranscriberError else { return false }
+        if case .noSpeechDetected = err { return true }
+        return false
+    }
+    /// Persisted styling for the caption strip. Default is enabled so a
+    /// freshly-generated transcription shows immediately.
+    var captionStyle: CaptionStyle {
+        didSet {
+            if oldValue != captionStyle {
+                Settings.shared.captionStyle = captionStyle
+                applyLayout()
+                registerUndoableChange(\.captionStyle, from: oldValue,
+                                       actionName: "Change Captions",
+                                       coalesceKey: "captionStyle")
+            }
+        }
+    }
+
     /// Per-track audio volumes (mic / system / soundboard). Applied to
     /// both live preview (via `AVPlayerItem.audioMix`) and export (via
     /// `AVAssetReaderAudioMixOutput.audioMix`). Persisted.
@@ -359,6 +432,8 @@ final class EditorViewModel {
         self.endCard                = Settings.shared.editorEndCard   ?? .defaultEnd
         self.exportQuality          = Settings.shared.exportQuality
         self.audioMixVolumes        = Settings.shared.editorAudioMixVolumes ?? .unity
+        self.captionStyle           = Settings.shared.captionStyle ?? .default
+        self.transcription          = project.transcription
 
         // Load any previously-persisted talking-head moments. If no log
         // exists (fresh recording or pre-persistence bundle), we start
@@ -381,10 +456,12 @@ final class EditorViewModel {
             webcamTransitions: webcamTransitions,
             startCard: startCard,
             endCard: endCard,
-            outputRange: CMTimeRange(start: .zero, duration: .zero),
+            trimMap: .entire(CMTimeRange(start: .zero, duration: .zero)),
             cursorRipples: [],
             cursorRippleStyle: .default,
-            talkingHeadKeyframes: []
+            talkingHeadKeyframes: [],
+            transcriptionLines: transcription?.lines ?? [],
+            captionStyle: captionStyle
         )
 
         attachPlayerObservers()
@@ -396,6 +473,9 @@ final class EditorViewModel {
 
     deinit {
         if let token = timeObserverToken {
+            player.removeTimeObserver(token)
+        }
+        for token in cutBoundaryTokens {
             player.removeTimeObserver(token)
         }
         rateObservation?.invalidate()
@@ -511,12 +591,63 @@ final class EditorViewModel {
                 // Snap exactly to trimEnd so the UI reads cleanly.
                 self.player.seek(to: self.trimEnd, toleranceBefore: .zero, toleranceAfter: .zero)
             }
+            // Fallback for interior cuts: if the playhead slipped into
+            // a cut (e.g. a system hiccup delayed the boundary observer
+            // past the cut.start), jump out. The boundary observer below
+            // fires first in the common case, so this rarely runs.
+            if let cut = self.cutRanges.first(where: {
+                CMTimeCompare(time, $0.start) >= 0 && CMTimeCompare(time, $0.end) < 0
+            }) {
+                self.player.seek(to: cut.end, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
         }
 
         rateObservation = player.observe(\.rate, options: [.initial, .new]) { [weak self] player, _ in
             let playing = player.rate > 0
             Task { @MainActor in self?.isPlaying = playing }
         }
+    }
+
+    /// Wire up per-cut boundary observers so playback skips past each
+    /// interior cut in real-time. Called whenever `cutRanges` changes
+    /// (via `applyLayout`). Each observer fires exactly when the
+    /// playhead crosses a cut-start and immediately seeks to the
+    /// cut-end. Without this the user would see cut content play back
+    /// during preview even though it won't be in the exported file.
+    private func refreshCutBoundaryObservers() {
+        for token in cutBoundaryTokens {
+            player.removeTimeObserver(token)
+        }
+        cutBoundaryTokens.removeAll(keepingCapacity: true)
+        for cut in cutRanges {
+            let start = cut.start
+            let end = cut.end
+            let token = player.addBoundaryTimeObserver(
+                forTimes: [NSValue(time: start)],
+                queue: .main
+            ) { [weak self] in
+                guard let self else { return }
+                // Only seek forward — if the user is scrubbing backward
+                // past the cut, the seek clamp in `seek(to:)` has
+                // already handled it.
+                guard CMTimeCompare(self.player.currentTime(), end) < 0 else { return }
+                self.player.seek(to: end, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+            cutBoundaryTokens.append(token)
+        }
+    }
+
+    /// If `time` falls inside an interior cut, return the nearest kept
+    /// boundary (snap to `cut.end` for forward motion; caller can still
+    /// force backward via `preferBackward`). Otherwise return `time`
+    /// unchanged. Used by `seek(to:)` + scrubber drags.
+    private func snapOutOfCut(_ time: CMTime, preferBackward: Bool = false) -> CMTime {
+        for cut in cutRanges {
+            if CMTimeCompare(time, cut.start) > 0 && CMTimeCompare(time, cut.end) < 0 {
+                return preferBackward ? cut.start : cut.end
+            }
+        }
+        return time
     }
 
     // MARK: - Playback controls
@@ -533,10 +664,13 @@ final class EditorViewModel {
         }
     }
 
-    /// Seek to an arbitrary composition time. Clamped to [0, duration].
+    /// Seek to an arbitrary composition time. Clamped to [0, duration]
+    /// and snapped out of any interior cut so the user never parks the
+    /// playhead inside a region that won't exist in the exported file.
     func seek(to time: CMTime) {
         let clamped = clamp(time, lower: .zero, upper: duration)
-        player.seek(to: clamped, toleranceBefore: .zero, toleranceAfter: .zero)
+        let snapped = snapOutOfCut(clamped)
+        player.seek(to: snapped, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     // MARK: - Keyboard navigation
@@ -632,6 +766,96 @@ final class EditorViewModel {
         }
     }
 
+    // MARK: - Interior cuts (ripple delete)
+
+    /// Smallest cut we're willing to place. Below this it's almost
+    /// certainly a misclick, and it introduces jitter in the exported
+    /// file without actually saving anything.
+    private static let minCutDuration = CMTime(value: 100, timescale: 1000)  // 0.1s
+
+    /// Excise `range` (in source-composition time) from the output.
+    /// Ranges overlapping existing cuts are merged by `TrimMap`;
+    /// ranges outside the outer trim are clamped / dropped. No-op if
+    /// the clamped range is shorter than `minCutDuration`.
+    func insertCut(_ range: CMTimeRange) {
+        // Clamp to outer trim before the min-duration check so a cut
+        // that extends past trimEnd still counts as long as the clipped
+        // portion is long enough to be meaningful.
+        let clampedStart = clamp(range.start, lower: trimStart, upper: trimEnd)
+        let clampedEnd   = clamp(range.end,   lower: trimStart, upper: trimEnd)
+        guard CMTimeCompare(clampedEnd, clampedStart) > 0 else { return }
+        let clamped = CMTimeRange(start: clampedStart, end: clampedEnd)
+        guard CMTimeCompare(clamped.duration, Self.minCutDuration) >= 0 else { return }
+        let old = cutRanges
+        // Round-trip through TrimMap to merge + sort with any existing.
+        let merged = TrimMap(outerTrim: trimRange, cuts: old + [clamped]).cuts
+        guard merged != old else { return }
+        cutRanges = merged
+        applyLayout()
+        registerUndoableSnapshot(
+            "Cut Section",
+            capture: { $0.cutRanges },
+            oldState: old
+        ) { vm, state in
+            vm.cutRanges = state
+            vm.applyLayout()
+        }
+    }
+
+    /// Remove the cut at `index` (no-op if out of range). Restores the
+    /// source region to the output timeline.
+    func removeCut(at index: Int) {
+        guard cutRanges.indices.contains(index) else { return }
+        let old = cutRanges
+        var next = cutRanges
+        next.remove(at: index)
+        cutRanges = next
+        applyLayout()
+        registerUndoableSnapshot(
+            "Restore Cut",
+            capture: { $0.cutRanges },
+            oldState: old
+        ) { vm, state in
+            vm.cutRanges = state
+            vm.applyLayout()
+        }
+    }
+
+    /// Anchor a range selection at the current playhead. Subsequent
+    /// scrubbing extends the selection to that new playhead position.
+    func markSelectionStart() {
+        selectionStart = currentTime
+    }
+
+    /// Drop the in-progress selection without cutting.
+    func clearSelection() {
+        selectionStart = nil
+    }
+
+    /// If a selection is active, convert it into a cut and clear the
+    /// selection anchor. No-op if there's no active selection.
+    func cutSelection() {
+        guard let range = selectionRange else { return }
+        insertCut(range)
+        selectionStart = nil
+    }
+
+    /// Wipe all interior cuts (keeps outer trim intact).
+    func clearCuts() {
+        guard !cutRanges.isEmpty else { return }
+        let old = cutRanges
+        cutRanges = []
+        applyLayout()
+        registerUndoableSnapshot(
+            "Clear Cuts",
+            capture: { $0.cutRanges },
+            oldState: old
+        ) { vm, state in
+            vm.cutRanges = state
+            vm.applyLayout()
+        }
+    }
+
     /// Re-run silence detection on the mic track and apply the detected
     /// trim. Useful if the user hit "Reset" and now wants the auto-trim
     /// back, or just wants to re-compute after moving files around.
@@ -660,6 +884,72 @@ final class EditorViewModel {
                     vm.applyLayout()
                 }
             }
+        }
+    }
+
+    // MARK: - Captions
+
+    /// Transcribe the mic track on-device via `CaptionTranscriber`,
+    /// persist to `transcription.json`, and push into the compositor.
+    /// Called by the inspector's "Generate captions" button. Runs async
+    /// and can take a while — `isTranscribing` drives the spinner; a
+    /// failure populates `transcriptionError` for the UI to surface.
+    /// Kick off captions generation. `allowCloudFallback` lets the
+    /// transcriber drop the `requiresOnDeviceRecognition` flag as a
+    /// last resort — macOS 26 has been observed to return empty
+    /// placeholder results from the on-device URL-request path even
+    /// when Dictation works locally. Cloud mode sends audio to Apple
+    /// for that single request only; the user opts in via the UI.
+    func generateCaptions(allowCloudFallback: Bool = false) {
+        guard !isTranscribing else { return }
+        isTranscribing = true
+        transcriptionError = nil
+        let audioURL = project.bundle.micAudioURL
+        Task { [weak self] in
+            do {
+                let log = try await CaptionTranscriber.transcribe(
+                    audioURL: audioURL,
+                    allowCloudFallback: allowCloudFallback
+                )
+                await MainActor.run {
+                    guard let self else { return }
+                    self.transcription = log
+                    self.isTranscribing = false
+                    self.persistTranscription()
+                    self.applyLayout()
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isTranscribing = false
+                    self.transcriptionError = error
+                    MentorDebug.log("CAPTIONS: generate failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// Remove the persisted transcription + clear the in-memory copy.
+    /// Used by the inspector's "Clear" button.
+    func clearCaptions() {
+        transcription = nil
+        try? FileManager.default.removeItem(at: project.transcriptionURL)
+        applyLayout()
+    }
+
+    private func persistTranscription() {
+        guard let log = transcription else {
+            try? FileManager.default.removeItem(at: project.transcriptionURL)
+            return
+        }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(log)
+            try data.write(to: project.transcriptionURL, options: .atomic)
+        } catch {
+            MentorDebug.log("CAPTIONS: persist failed: \(error)")
         }
     }
 
@@ -706,11 +996,17 @@ final class EditorViewModel {
             webcamTransitions: webcamTransitions,
             startCard: startCard,
             endCard: endCard,
-            outputRange: trimRange,
+            trimMap: trimMap,
             cursorRipples: cursorRipplesEnabled ? cursorRipples : [],
             cursorRippleStyle: .default,
-            talkingHeadKeyframes: talkingHeadKeyframes
+            talkingHeadKeyframes: talkingHeadKeyframes,
+            transcriptionLines: transcription?.lines ?? [],
+            captionStyle: captionStyle
         )
+        // Keep cut-skipping in sync with the current cutRanges. Cheap
+        // — O(cuts) observer install each call, and cut edits are low-
+        // frequency (user action, not drag).
+        refreshCutBoundaryObservers()
         forceRedraw()
     }
 
@@ -1233,11 +1529,13 @@ final class EditorViewModel {
             cursorRippleStyle: .default,
             talkingHeadKeyframes: talkingHeadKeyframes,
             videoBitrate: exportQuality.bitrate,
-            audioMixVolumes: audioMixVolumes
+            audioMixVolumes: audioMixVolumes,
+            transcriptionLines: transcription?.lines ?? [],
+            captionStyle: captionStyle
         )
         let bundle = project.bundle
         let metadata = project.metadata
-        let trim: CMTimeRange? = (trimStart == .zero && trimEnd == duration) ? nil : trimRange
+        let exportMap: TrimMap? = trimMap.isTrivial(fullDuration: duration) ? nil : trimMap
 
         isExporting = true
         exportProgress = 0
@@ -1250,7 +1548,7 @@ final class EditorViewModel {
                     bundle: bundle,
                     metadata: metadata,
                     layout: layout,
-                    trimRange: trim,
+                    trimMap: exportMap,
                     outputURL: outputURL
                 ) { fraction in
                     Task { @MainActor in

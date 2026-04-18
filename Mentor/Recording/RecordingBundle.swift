@@ -36,6 +36,9 @@ struct RecordingBundle {
     /// Persisted zoom keyframes (auto-generated on first editor open,
     /// but preserved + editable after that).
     var zoomURL: URL            { sidecarURL.appendingPathComponent("zoom.json") }
+    /// Burned-in subtitles — populated the first time the user clicks
+    /// "Generate captions" in the editor, and used verbatim on reopen.
+    var transcriptionURL: URL   { sidecarURL.appendingPathComponent("transcription.json") }
 
     static func make(baseDirectory: URL, timestamp: Date = Date()) -> RecordingBundle {
         let formatter = DateFormatter()

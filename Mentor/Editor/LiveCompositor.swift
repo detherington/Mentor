@@ -28,16 +28,21 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             let webcamTransitions: WebcamTransitions
             let startCard: TitleCard
             let endCard: TitleCard
-            /// Effective output time range — i.e. the trim window in
-            /// composition time. Webcam fades + title cards are keyed to
-            /// this range, NOT the full composition, so trimming the start
-            /// doesn't hide the start card. Defaults to zero for the
-            /// initial snapshot; replaced by the editor / renderer once
-            /// the composition (and trim) is known.
-            let outputRange: CMTimeRange
+            /// Effective output time map — the outer trim window plus
+            /// any interior cuts. Webcam fades + title cards key to
+            /// `trimMap.outputDuration` (the true length of what the
+            /// viewer sees), NOT the full composition, so trimming /
+            /// cutting doesn't push cards out of view. Defaults to zero
+            /// for the initial snapshot; replaced by the editor /
+            /// renderer once the composition is known.
+            let trimMap: TrimMap
             let cursorRipples: [CursorRipple]
             let cursorRippleStyle: CursorRippleStyle
             let talkingHeadKeyframes: [TalkingHeadKeyframe]
+            /// Burned-in subtitles. Empty `lines` or `style.enabled`
+            /// false → compositor short-circuits before per-frame lookup.
+            let transcriptionLines: [TranscriptionLine]
+            let captionStyle: CaptionStyle
         }
 
         private let lock = NSLock()
@@ -61,10 +66,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             webcamTransitions: WebcamTransitions? = nil,
             startCard: TitleCard? = nil,
             endCard: TitleCard? = nil,
-            outputRange: CMTimeRange? = nil,
+            trimMap: TrimMap? = nil,
             cursorRipples: [CursorRipple]? = nil,
             cursorRippleStyle: CursorRippleStyle? = nil,
-            talkingHeadKeyframes: [TalkingHeadKeyframe]? = nil
+            talkingHeadKeyframes: [TalkingHeadKeyframe]? = nil,
+            transcriptionLines: [TranscriptionLine]? = nil,
+            captionStyle: CaptionStyle? = nil
         ) {
             lock.lock(); defer { lock.unlock() }
             current = Snapshot(
@@ -76,10 +83,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
                 webcamTransitions: webcamTransitions ?? current.webcamTransitions,
                 startCard: startCard ?? current.startCard,
                 endCard: endCard ?? current.endCard,
-                outputRange: outputRange ?? current.outputRange,
+                trimMap: trimMap ?? current.trimMap,
                 cursorRipples: cursorRipples ?? current.cursorRipples,
                 cursorRippleStyle: cursorRippleStyle ?? current.cursorRippleStyle,
-                talkingHeadKeyframes: talkingHeadKeyframes ?? current.talkingHeadKeyframes
+                talkingHeadKeyframes: talkingHeadKeyframes ?? current.talkingHeadKeyframes,
+                transcriptionLines: transcriptionLines ?? current.transcriptionLines,
+                captionStyle: captionStyle ?? current.captionStyle
             )
         }
     }
@@ -95,10 +104,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             webcamTransitions: .default,
             startCard: .defaultStart,
             endCard: .defaultEnd,
-            outputRange: CMTimeRange(start: .zero, duration: .zero),
+            trimMap: .entire(CMTimeRange(start: .zero, duration: .zero)),
             cursorRipples: [],
             cursorRippleStyle: .default,
-            talkingHeadKeyframes: []
+            talkingHeadKeyframes: [],
+            transcriptionLines: [],
+            captionStyle: .default
         )
     )
 
@@ -135,6 +146,14 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
     private var cachedEndCardKey: Int?
     private var cachedEndCardSize: CGSize = .zero
     private var cachedEndCardImage: CIImage?
+
+    // Caption cache — one rendered image per (text, style, size). A
+    // typical recording has dozens of distinct caption lines so an LRU
+    // would be nicer; a single-slot cache is enough in practice because
+    // the compositor only ever shows one line at a time, and we only
+    // re-render when the active line changes.
+    private var cachedCaptionKey: String?
+    private var cachedCaptionImage: CIImage?
 
     private var debugFrameCount: Int64 = 0
 
@@ -258,10 +277,10 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             let (effDiameter, effOrigin) = webcamGeometry(layout: layout, time: frameTime, outputSize: outputSize)
             if effDiameter > 0,
                var overlay = buildWebcamImage(camera: webcam, shape: layout.shape, diameter: effDiameter) {
-                let timeInOutput = effectiveTime(frameTime, in: layout.outputRange)
+                let timeInOutput = layout.trimMap.outputTime(forSourceTime: frameTime)
                 let webcamAlpha = layout.webcamTransitions.alpha(
                     at: timeInOutput,
-                    totalDuration: layout.outputRange.duration
+                    totalDuration: layout.trimMap.outputDuration
                 )
                 if webcamAlpha < 0.999 {
                     overlay = applyAlpha(webcamAlpha, to: overlay)
@@ -276,6 +295,7 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         }
 
         composite = applyTitleCards(over: composite, layout: layout, time: frameTime, outputSize: outputSize)
+        composite = applyCaptions(over: composite, layout: layout, time: frameTime, outputSize: outputSize)
 
         let cropped = composite.cropped(to: CGRect(origin: .zero, size: outputSize))
         ciContext.render(
@@ -375,6 +395,46 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
     /// Time math is in **output time** (i.e. relative to `outputRange.start`),
     /// so trimming the start of the recording doesn't push the start card
     /// out of view.
+    /// Composite the active subtitle line (if any) over `base`. Cached
+    /// by `{text, style, size}` so the same rendered image is reused
+    /// for every frame the line is on screen.
+    private func applyCaptions(
+        over base: CIImage,
+        layout: State.Snapshot,
+        time: CMTime,
+        outputSize: CGSize
+    ) -> CIImage {
+        guard layout.captionStyle.enabled, !layout.transcriptionLines.isEmpty else {
+            return base
+        }
+        let secs = CMTimeGetSeconds(time)
+        guard secs.isFinite else { return base }
+        // Linear scan is fine — editing sessions typically have < ~200
+        // lines, binary-search wouldn't win measurably.
+        guard let active = layout.transcriptionLines.first(where: { secs >= $0.startSeconds && secs < $0.endSeconds }) else {
+            return base
+        }
+
+        let key = captionCacheKey(text: active.text, style: layout.captionStyle, size: outputSize)
+        let image: CIImage?
+        if cachedCaptionKey == key, let cached = cachedCaptionImage {
+            image = cached
+        } else {
+            image = CaptionRenderer.render(text: active.text, style: layout.captionStyle, canvasSize: outputSize)
+            cachedCaptionKey = key
+            cachedCaptionImage = image
+        }
+        guard let captionImage = image else { return base }
+        return captionImage.composited(over: base)
+    }
+
+    private func captionCacheKey(text: String, style: CaptionStyle, size: CGSize) -> String {
+        // Enough state to invalidate when anything visible changes,
+        // stringly-typed for trivial equality. Font sizing is derived
+        // from `size` + `fontSizeFraction`, so both are in the key.
+        "\(text)|\(Int(size.width))x\(Int(size.height))|\(style.fontSizeFraction)|\(style.bottomInsetFraction)|\(style.textColor.red),\(style.textColor.green),\(style.textColor.blue),\(style.textColor.alpha)|\(style.backgroundColor.red),\(style.backgroundColor.green),\(style.backgroundColor.blue),\(style.backgroundColor.alpha)"
+    }
+
     private func applyTitleCards(
         over base: CIImage,
         layout: State.Snapshot,
@@ -382,9 +442,9 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         outputSize: CGSize
     ) -> CIImage {
         var out = base
-        let timeInOutput = effectiveTime(time, in: layout.outputRange)
+        let timeInOutput = layout.trimMap.outputTime(forSourceTime: time)
         let secs  = CMTimeGetSeconds(timeInOutput)
-        let total = CMTimeGetSeconds(layout.outputRange.duration)
+        let total = CMTimeGetSeconds(layout.trimMap.outputDuration)
         guard secs.isFinite else { return out }
 
         // ---- Start card: opacity 1 at t=0, decays to 0 at fadeDuration.
@@ -415,16 +475,6 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         }
 
         return out
-    }
-
-    /// Convert a composition-time PTS into a time relative to the start of
-    /// the output range, clamped to [0, range.duration]. Saves every
-    /// transition / card calc from re-doing the same arithmetic.
-    private func effectiveTime(_ t: CMTime, in range: CMTimeRange) -> CMTime {
-        let raw = CMTimeSubtract(t, range.start)
-        if CMTimeCompare(raw, .zero) < 0 { return .zero }
-        if range.duration > .zero, CMTimeCompare(raw, range.duration) > 0 { return range.duration }
-        return raw
     }
 
     private func startCardImage(layout: State.Snapshot, size: CGSize) -> CIImage? {
