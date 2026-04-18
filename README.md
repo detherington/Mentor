@@ -109,3 +109,9 @@ Order in each frame: screen → cursor ripples → smart zoom → webcam (with f
 - Export path uses High profile + frame-rate hints. No `AVAssetExportSession` — it picks heuristics that produce jittery output with mixed-rate sources.
 - `AVAudioFile` can't encode AAC directly from non-interleaved float mixer taps, so the soundboard records to a temp `.caf` and transcodes to AAC on stop.
 - Debug log at `/tmp/mentor-debug.log` via `MentorDebug.log(...)`.
+
+### Debug-build capture jitter
+
+Expect visible frame drops in the screen track when recording from a **Debug** build, especially at retina sizes (≥3600×2338 @ 60fps). Debug is compiled `-Onone` with `@Observable` tracking and SwiftUI instrumentation fully inlined; the extra per-frame overhead eats into the HW H.264 encoder's time budget and `AVAssetWriter` starts dropping samples under back-pressure. Release (optimised, same code path) records cleanly.
+
+**Always benchmark capture throughput from the `./build-dmg.sh` output or an installed DMG — never from the Xcode-run Debug binary.**
