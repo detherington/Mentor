@@ -8,6 +8,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // Callbacks
     var onChooseSourceAndRecord: () -> Void = {}
     var onStop: () -> Void = {}
+    var onTogglePause: () -> Void = {}
     var onRevealOutput: () -> Void = {}
     var onShowSettings: () -> Void = {}
     var onShowSoundboard: () -> Void = {}
@@ -22,6 +23,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var micLevelProvider: (() -> Float?)?
 
     private var startStopItem: NSMenuItem!
+    private var pauseResumeItem: NSMenuItem!
     private var webcamPreviewItem: NSMenuItem!
     private var teleprompterItem: NSMenuItem!
     private var micLevelItem: NSMenuItem!
@@ -37,6 +39,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var micPollTimer: Timer?
     private var recordingStart: Date?
     private var isFinalizing: Bool = false
+    /// Wall-clock time the current pause started. Used by the
+    /// duration ticker to subtract paused wall-clock out of the
+    /// displayed "elapsed" number so it matches what the writers
+    /// will bake into the final recording.
+    private var pauseStart: Date?
+    /// Cumulative paused wall-clock across the full recording —
+    /// survives across pause/resume cycles, zeroed on stop.
+    private var accumulatedPause: TimeInterval = 0
+    private var isPaused: Bool = false
 
     override init() {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -45,7 +56,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func configure() {
-        statusItem.button?.image = recordIcon(recording: false)
+        statusItem.button?.image = recordIcon(recording: false, paused: false)
         statusItem.button?.imagePosition = .imageLeft
 
         startStopItem = NSMenuItem(
@@ -56,6 +67,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         startStopItem.keyEquivalentModifierMask = [.command, .shift]
         startStopItem.target = self
         menu.addItem(startStopItem)
+
+        // Pause / Resume — hidden until a recording is running, so
+        // the idle menu stays tidy. ⌘⇧P toggles.
+        pauseResumeItem = NSMenuItem(
+            title: "Pause Recording",
+            action: #selector(handleTogglePause(_:)),
+            keyEquivalent: "p"
+        )
+        pauseResumeItem.keyEquivalentModifierMask = [.command, .shift]
+        pauseResumeItem.target = self
+        pauseResumeItem.isHidden = true
+        menu.addItem(pauseResumeItem)
 
         // Contention warning — sits right under Start Recording so
         // users see it just as they're about to hit record. Both the
@@ -170,16 +193,48 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func setRecording(_ recording: Bool) {
         if recording {
             recordingStart = Date()
+            accumulatedPause = 0
+            pauseStart = nil
+            isPaused = false
             startStopItem.title = "Stop Recording"
-            updateButtonForRecording(true)
+            pauseResumeItem.isHidden = false
+            pauseResumeItem.title = "Pause Recording"
+            updateButtonForRecording(recording: true, paused: false)
             startDurationTicker()
             applyHideIconIfNeeded(recording: true)
         } else {
             recordingStart = nil
+            accumulatedPause = 0
+            pauseStart = nil
+            isPaused = false
             startStopItem.title = "Start Recording…"
-            updateButtonForRecording(false)
+            pauseResumeItem.isHidden = true
+            pauseResumeItem.title = "Pause Recording"
+            updateButtonForRecording(recording: false, paused: false)
             stopDurationTicker()
             applyHideIconIfNeeded(recording: false)
+        }
+    }
+
+    /// Reflect pause state in the menu + icon. Caller passes `true`
+    /// when coordinator.pauseRecording() has been invoked, `false` on
+    /// resume. Keeps the elapsed-time ticker frozen during pause so
+    /// the displayed duration matches what actually gets written.
+    func setPaused(_ paused: Bool) {
+        guard recordingStart != nil else { return }
+        if paused, !isPaused {
+            isPaused = true
+            pauseStart = Date()
+            pauseResumeItem.title = "Resume Recording"
+            updateButtonForRecording(recording: true, paused: true)
+        } else if !paused, isPaused {
+            if let start = pauseStart {
+                accumulatedPause += Date().timeIntervalSince(start)
+            }
+            pauseStart = nil
+            isPaused = false
+            pauseResumeItem.title = "Pause Recording"
+            updateButtonForRecording(recording: true, paused: false)
         }
     }
 
@@ -206,7 +261,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             statusItem.button?.title = " Finalizing…"
         } else if recordingStart == nil {
             // Return to idle state.
-            updateButtonForRecording(false)
+            updateButtonForRecording(recording: false, paused: false)
         }
     }
 
@@ -227,6 +282,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             onChooseSourceAndRecord()
         }
     }
+    @objc private func handleTogglePause(_ sender: Any?) { onTogglePause() }
     @objc private func handleReveal(_ sender: Any?) { onRevealOutput() }
     @objc private func handleSettings(_ sender: Any?) { onShowSettings() }
     @objc private func handleSoundboard(_ sender: Any?) { onShowSoundboard() }
@@ -314,7 +370,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     // MARK: - Internals
 
-    private func recordIcon(recording: Bool) -> NSImage? {
+    private func recordIcon(recording: Bool, paused: Bool) -> NSImage? {
+        if paused {
+            // Pause symbol (amber) so the menu bar clearly reads as
+            // "recording, but on hold" rather than "recording live."
+            let base = NSImage(systemSymbolName: "pause.circle.fill", accessibilityDescription: "Mentor (paused)")
+            if let base {
+                let config = NSImage.SymbolConfiguration(paletteColors: [.systemOrange])
+                return base.withSymbolConfiguration(config) ?? base
+            }
+            return base
+        }
         let name = recording ? "record.circle.fill" : "record.circle"
         let base = NSImage(systemSymbolName: name, accessibilityDescription: "Mentor")
         if recording, let base {
@@ -328,9 +394,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return base
     }
 
-    private func updateButtonForRecording(_ recording: Bool) {
+    private func updateButtonForRecording(recording: Bool, paused: Bool) {
         guard let button = statusItem.button else { return }
-        button.image = recordIcon(recording: recording)
+        button.image = recordIcon(recording: recording, paused: paused)
         button.contentTintColor = nil   // never override; title uses system text color
         button.title = recording ? " 00:00" : ""
     }
@@ -353,7 +419,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func refreshDuration() {
         guard let start = recordingStart else { return }
-        let secs = Int(Date().timeIntervalSince(start))
+        // Subtract any wall-clock time spent paused — both fully-
+        // elapsed pauses (accumulatedPause) and the currently-live
+        // pause, if any — so the displayed elapsed matches the
+        // retimed video duration that will end up on disk.
+        var paused = accumulatedPause
+        if let pauseStart {
+            paused += Date().timeIntervalSince(pauseStart)
+        }
+        let secs = max(0, Int(Date().timeIntervalSince(start) - paused))
         let h = secs / 3600
         let m = (secs % 3600) / 60
         let s = secs % 60

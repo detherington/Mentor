@@ -48,6 +48,27 @@ final class CaptureCoordinator: @unchecked Sendable {
         return _isRecording
     }
 
+    /// Pause-state machine. Host-clock based so the cumulative offset
+    /// is in the same time domain as incoming CMSampleBuffer PTS
+    /// values (CMClockGetHostTimeClock()), and can be subtracted
+    /// directly to close the wall-clock gap in retimed samples.
+    private let pauseLock = NSLock()
+    private var _isPaused: Bool = false
+    private var _pauseStart: CMTime = .invalid
+    private var _cumulativePauseOffset: CMTime = .zero
+
+    var isPaused: Bool {
+        pauseLock.lock(); defer { pauseLock.unlock() }
+        return _isPaused
+    }
+
+    /// Total paused duration so far (host-time domain). Callers read
+    /// this to keep subsidiary loggers' offsets in sync.
+    var cumulativePauseOffsetSeconds: TimeInterval {
+        pauseLock.lock(); defer { pauseLock.unlock() }
+        return CMTimeGetSeconds(_cumulativePauseOffset)
+    }
+
     private let pipelineLock = NSLock()
     private var screenRawWriter: RawTrackWriter?
     private var webcamRawWriter: RawTrackWriter?
@@ -229,6 +250,15 @@ final class CaptureCoordinator: @unchecked Sendable {
             throw error
         }
 
+        // Fresh recording — zero out any leftover pause state from a
+        // previous session so the first sample writes at PTS 0
+        // instead of inheriting an offset from a prior pause.
+        pauseLock.lock()
+        _isPaused = false
+        _pauseStart = .invalid
+        _cumulativePauseOffset = .zero
+        pauseLock.unlock()
+
         stateLock.lock()
         _isRecording = true
         stateLock.unlock()
@@ -236,11 +266,93 @@ final class CaptureCoordinator: @unchecked Sendable {
 
     /// Stop capture, flush all sidecar writers, write events + metadata.
     /// Caller is responsible for kicking off `FinalRenderer` on the bundle.
+    /// Pause the current recording. Samples captured while paused are
+    /// dropped at the coordinator delegate; on resume, subsequent
+    /// samples are retimed by the accumulated paused duration so the
+    /// output tracks read as continuous with no freeze-frame gap.
+    /// Subsidiary loggers (events, cursor) are also paused and given
+    /// the same cumulative offset on resume so their timestamps stay
+    /// aligned with the retimed A/V. No-ops if not recording or
+    /// already paused.
+    func pauseRecording() {
+        stateLock.lock()
+        let active = _isRecording
+        stateLock.unlock()
+        guard active else { return }
+
+        pauseLock.lock()
+        guard !_isPaused else { pauseLock.unlock(); return }
+        _isPaused = true
+        _pauseStart = CMClockGetTime(CMClockGetHostTimeClock())
+        pauseLock.unlock()
+
+        pipelineLock.lock()
+        let evt = self.eventRecorder
+        let cur = self.cursorSampler
+        pipelineLock.unlock()
+        evt?.setPaused(true)
+        cur?.setPaused(true)
+        MentorDebug.log("COORD: recording paused")
+    }
+
+    /// Resume from pause. Computes this pause interval, folds it
+    /// into the cumulative offset, then flips subsidiary loggers
+    /// back on with the fresh offset value. No-ops if not recording
+    /// or not currently paused.
+    func resumeRecording() {
+        stateLock.lock()
+        let active = _isRecording
+        stateLock.unlock()
+        guard active else { return }
+
+        pauseLock.lock()
+        guard _isPaused, _pauseStart.isValid else {
+            pauseLock.unlock()
+            return
+        }
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        let duration = CMTimeSubtract(now, _pauseStart)
+        _cumulativePauseOffset = CMTimeAdd(_cumulativePauseOffset, duration)
+        _isPaused = false
+        _pauseStart = .invalid
+        let offsetSeconds = CMTimeGetSeconds(_cumulativePauseOffset)
+        pauseLock.unlock()
+
+        pipelineLock.lock()
+        let evt = self.eventRecorder
+        let cur = self.cursorSampler
+        pipelineLock.unlock()
+        evt?.setPaused(false, cumulativeOffsetSeconds: offsetSeconds)
+        cur?.setPaused(false, cumulativeOffsetSeconds: offsetSeconds)
+        MentorDebug.log("COORD: recording resumed (cumulative pause offset: \(String(format: "%.2fs", offsetSeconds)))")
+    }
+
+    /// Snapshot of pause state used by the sample-handler hot path.
+    /// Returns `(drop, offset)` — drop true means the sample is
+    /// captured inside a paused window and should be discarded;
+    /// otherwise retime the sample by `offset` before writing.
+    private func pauseStateForSample() -> (drop: Bool, offset: CMTime) {
+        pauseLock.lock()
+        let drop = _isPaused
+        let offset = _cumulativePauseOffset
+        pauseLock.unlock()
+        return (drop, offset)
+    }
+
     func stopRecording() async -> FinishedRecording? {
         stateLock.lock()
         guard _isRecording else { stateLock.unlock(); return nil }
         _isRecording = false
         stateLock.unlock()
+
+        // Clear pause state. If the user stops while paused, we
+        // don't want a stale `_isPaused` + offset to leak into the
+        // next recording. Loggers are idempotent on setPaused —
+        // safe to set false even if they weren't paused.
+        pauseLock.lock()
+        _isPaused = false
+        _pauseStart = .invalid
+        pauseLock.unlock()
 
         await screenCapture.stop()
 
@@ -377,16 +489,22 @@ extension CaptureCoordinator: ScreenCaptureDelegate {
         screenDelegateCalls &+= 1
         if screenRaw == nil { screenDelegateWithNilWriter &+= 1 }
         coordStatsLock.unlock()
+        let (drop, offset) = pauseStateForSample()
+        if drop { return }
+        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
         // Only the raw track is written live — composited output is
         // rebuilt post-capture by FinalRenderer.
-        screenRaw?.append(sample)
+        screenRaw?.append(adjusted)
     }
 
     func screenCapture(_ capture: ScreenCapture, didOutputAudio sample: CMSampleBuffer) {
         pipelineLock.lock()
         let sysWriter = self.systemAudioWriter
         pipelineLock.unlock()
-        sysWriter?.append(sample)
+        let (drop, offset) = pauseStateForSample()
+        if drop { return }
+        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
+        sysWriter?.append(adjusted)
     }
 
     func screenCapture(_ capture: ScreenCapture, didFailWith error: Error) {
@@ -406,19 +524,38 @@ extension CaptureCoordinator: CameraCaptureDelegate {
         if webcamRaw == nil { cameraDelegateWithNilWriter &+= 1 }
         coordStatsLock.unlock()
 
-        webcamRaw?.append(sample)
-
+        // The preview always sees the latest frame, even during
+        // pause — freezing the webcam preview mid-pause would be
+        // disorienting. Only the recording writer is gated by the
+        // pause state.
         observerLock.lock()
         let observer = _cameraFrameObserver
         observerLock.unlock()
         observer?(imageBuffer)
+
+        let (drop, offset) = pauseStateForSample()
+        if drop { return }
+        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
+        webcamRaw?.append(adjusted)
     }
 
     func cameraCapture(_ capture: CameraCapture, didOutputAudio sample: CMSampleBuffer) {
         pipelineLock.lock()
         let micWriter = self.micAudioWriter
         pipelineLock.unlock()
-        micWriter?.append(sample)
+        let (drop, offset) = pauseStateForSample()
+        if drop {
+            // Mic tap still sees samples while paused — teleprompter
+            // follow-voice + any other live listener shouldn't go
+            // silent just because the writer is on hold.
+            micTapLock.lock()
+            let sink = _micSampleSink
+            micTapLock.unlock()
+            sink?(sample)
+            return
+        }
+        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
+        micWriter?.append(adjusted)
 
         // Tee to any attached live-amplitude sink (e.g. the
         // teleprompter's follow-voice mode). Read the closure

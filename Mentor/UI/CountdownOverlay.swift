@@ -1,12 +1,15 @@
 import AppKit
 
 /// Fullscreen 3-2-1 countdown shown before recording starts.
+/// Optional per-tick beep and "Go!" flash, both opt-in via Settings.
 @MainActor
 final class CountdownOverlay {
     private var window: NSPanel?
     private var label: NSTextField?
     private var current: Int = 0
     private var onComplete: (() -> Void)?
+    private var beepEnabled: Bool = false
+    private var showGo: Bool = false
 
     func show(seconds: Int, onComplete: @escaping () -> Void) {
         guard seconds > 0, let screen = NSScreen.main else {
@@ -15,6 +18,10 @@ final class CountdownOverlay {
         }
         self.onComplete = onComplete
         self.current = seconds
+        // Snapshot Settings once — users changing these mid-countdown
+        // would be weird and the read-on-every-tick is free to skip.
+        self.beepEnabled = Settings.shared.countdownBeepEnabled
+        self.showGo = Settings.shared.countdownShowGo
 
         let frame = screen.frame
         let win = NSPanel(
@@ -62,18 +69,46 @@ final class CountdownOverlay {
         self.label = lbl
 
         win.orderFront(nil)
+        // First tick fires synchronously so the user sees the starting
+        // number + hears the first beep immediately — waiting a full
+        // second before "3" would make the feature feel sluggish.
+        if beepEnabled { playTickSound(highPitch: false) }
         tick()
     }
 
     private func tick() {
         guard let label, current > 0 else {
-            dismiss()
+            // Countdown hit zero. If "Go!" is enabled, flash it for
+            // ~300ms with the higher-pitched beep; otherwise dismiss
+            // immediately so the recording starts right on cue.
+            if showGo {
+                flashGo()
+            } else {
+                dismiss()
+            }
             return
         }
         label.stringValue = "\(current)"
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.current -= 1
-            self?.tick()
+            guard let self else { return }
+            self.current -= 1
+            if self.current > 0 {
+                if self.beepEnabled { self.playTickSound(highPitch: false) }
+            }
+            self.tick()
+        }
+    }
+
+    private func flashGo() {
+        guard let label else { dismiss(); return }
+        label.font = .systemFont(ofSize: 160, weight: .heavy)
+        label.stringValue = "Go!"
+        if beepEnabled { playTickSound(highPitch: true) }
+        // Short hold — long enough to register, short enough not to
+        // delay the recording. 300 ms matches typical "screen flash"
+        // cues in other capture apps.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.dismiss()
         }
     }
 
@@ -84,5 +119,17 @@ final class CountdownOverlay {
         let cb = onComplete
         onComplete = nil
         cb?()
+    }
+
+    /// Play a short system tick/chime. `highPitch` lifts the final
+    /// "Go!" cue above the regular ticks so the user's ear marks it
+    /// as the start. Uses NSSound so there's no latency priming an
+    /// AVAudioEngine for a single shot.
+    private func playTickSound(highPitch: Bool) {
+        // `Tink` is the short, light system tick — feels right for a
+        // countdown. `Ping` is slightly higher + brighter for the Go!
+        // moment. Both ship with every macOS install.
+        let name = highPitch ? NSSound.Name("Ping") : NSSound.Name("Tink")
+        NSSound(named: name)?.play()
     }
 }

@@ -38,6 +38,12 @@ final class EventRecorder {
     private var referenceUptime: TimeInterval = 0
     private var startDate = Date()
     private var started = false
+    /// Accumulated wall-clock time the user has spent paused. Each
+    /// event's `t` is computed as `event.timestamp - referenceUptime
+    /// - pausedOffset` so events time-align with the A/V tracks the
+    /// coordinator retimed to close the pause gap.
+    private var pausedOffset: TimeInterval = 0
+    private var paused: Bool = false
 
     func start() {
         lock.lock()
@@ -74,6 +80,21 @@ final class EventRecorder {
         workspaceObservers.append(obs)
     }
 
+    /// Enter / exit the paused state. While paused, incoming events
+    /// are dropped outright — simpler than buffering + discarding,
+    /// and matches what the A/V writers do. `cumulativeOffsetSeconds`
+    /// comes from the capture coordinator's shared pause clock so
+    /// post-resume events get timestamps that line up with the
+    /// retimed video frames.
+    func setPaused(_ newPaused: Bool, cumulativeOffsetSeconds: TimeInterval = 0) {
+        lock.lock()
+        paused = newPaused
+        if !newPaused {
+            pausedOffset = cumulativeOffsetSeconds
+        }
+        lock.unlock()
+    }
+
     /// Stop monitoring and return the collected log. Safe to call twice
     /// (returns nil after the first call).
     func stop() -> Log? {
@@ -97,9 +118,19 @@ final class EventRecorder {
 
     // MARK: - Internal event recording
 
+    /// Coordinator-aware timestamp: returns nil while paused (caller
+    /// drops the event), otherwise the event's relative time with
+    /// cumulative pause offset subtracted — so events on either side
+    /// of a pause land next to their corresponding A/V frames after
+    /// retiming.
+    private func adjustedTime(for rawHostUptime: TimeInterval) -> TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        if paused { return nil }
+        return rawHostUptime - referenceUptime - pausedOffset
+    }
+
     private func recordMouse(_ event: NSEvent) {
-        let t = event.timestamp - referenceUptime
-        guard t >= 0 else { return }
+        guard let t = adjustedTime(for: event.timestamp), t >= 0 else { return }
         let button: String
         let isDown: Bool
         switch event.type {
@@ -123,8 +154,7 @@ final class EventRecorder {
     }
 
     private func recordKey(_ event: NSEvent) {
-        let t = event.timestamp - referenceUptime
-        guard t >= 0 else { return }
+        guard let t = adjustedTime(for: event.timestamp), t >= 0 else { return }
         let type: String
         var code: Int?
         var chars: String?
@@ -155,8 +185,7 @@ final class EventRecorder {
 
     private func recordActivation(_ note: Notification) {
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-        let t = ProcessInfo.processInfo.systemUptime - referenceUptime
-        guard t >= 0 else { return }
+        guard let t = adjustedTime(for: ProcessInfo.processInfo.systemUptime), t >= 0 else { return }
         let e = Event(
             t: t,
             type: "appActivate",

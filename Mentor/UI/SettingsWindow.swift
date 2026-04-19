@@ -36,6 +36,8 @@ private struct SettingsView: View {
     @State private var systemAudio     = Settings.shared.captureSystemAudio
     @State private var countdownEnabled = Settings.shared.countdownEnabled
     @State private var countdownSeconds = Settings.shared.countdownSeconds
+    @State private var countdownBeep    = Settings.shared.countdownBeepEnabled
+    @State private var countdownGo      = Settings.shared.countdownShowGo
     @State private var hideMenuBar     = Settings.shared.hideMenuBarIconWhenRecording
     @State private var cameraDeviceID: String = Settings.shared.cameraDeviceID ?? ""
     @State private var micDeviceID: String    = Settings.shared.microphoneDeviceID ?? ""
@@ -113,6 +115,12 @@ private struct SettingsView: View {
                         Text("Countdown duration: \(countdownSeconds) sec")
                     }
                     .onChange(of: countdownSeconds) { _, v in Settings.shared.countdownSeconds = v }
+
+                    Toggle("Beep on each tick", isOn: $countdownBeep)
+                        .onChange(of: countdownBeep) { _, v in Settings.shared.countdownBeepEnabled = v }
+
+                    Toggle("Flash \"Go!\" when countdown reaches zero", isOn: $countdownGo)
+                        .onChange(of: countdownGo) { _, v in Settings.shared.countdownShowGo = v }
                 }
 
                 Toggle("Hide menu bar icon while recording", isOn: $hideMenuBar)

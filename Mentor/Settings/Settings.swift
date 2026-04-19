@@ -88,6 +88,13 @@ final class Settings {
         static let captureSystemAudio = "captureSystemAudio"
         static let countdownEnabled   = "countdownEnabled"
         static let countdownSeconds   = "countdownSeconds"
+        /// Beep on each tick of the pre-record countdown. Helpful
+        /// for off-screen cues; distracting for silent demos. Opt-in.
+        static let countdownBeepEnabled = "countdownBeepEnabled"
+        /// Flash "Go!" when the countdown reaches zero before the
+        /// countdown overlay dismisses. Satisfying visual cue; some
+        /// users find it corny. Opt-in.
+        static let countdownShowGo    = "countdownShowGo"
         static let hideMenuBarIconWhenRecording = "hideMenuBarIconWhenRecording"
         static let showWebcamPreview = "showWebcamPreview"
         static let cameraDeviceID = "cameraDeviceID"
@@ -201,6 +208,16 @@ final class Settings {
     var countdownSeconds: Int {
         get { max(1, defaults.integer(forKey: Key.countdownSeconds)) }
         set { defaults.set(max(1, newValue), forKey: Key.countdownSeconds); post() }
+    }
+
+    var countdownBeepEnabled: Bool {
+        get { defaults.bool(forKey: Key.countdownBeepEnabled) }
+        set { defaults.set(newValue, forKey: Key.countdownBeepEnabled); post() }
+    }
+
+    var countdownShowGo: Bool {
+        get { defaults.bool(forKey: Key.countdownShowGo) }
+        set { defaults.set(newValue, forKey: Key.countdownShowGo); post() }
     }
 
     var hideMenuBarIconWhenRecording: Bool {

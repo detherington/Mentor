@@ -264,10 +264,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menuBar.onChooseSourceAndRecord = { [weak self] in self?.chooseAndRecord() }
         menuBar.onStop                  = { [weak self] in self?.stopRecording() }
+        menuBar.onTogglePause           = { [weak self] in self?.togglePause() }
         menuBar.onRevealOutput          = { [weak self] in self?.revealOutput() }
         menuBar.onShowSettings          = { [weak self] in self?.settingsController.show() }
         menuBar.onShowSoundboard        = { [weak self] in self?.soundboardWindow.show() }
-        menuBar.onCheckForUpdates       = { [weak self] in self?.updater.checkForUpdates(nil) }
+        menuBar.onCheckForUpdates       = { [weak self] in
+            // LSUIElement apps don't auto-activate when menu-bar
+            // actions fire, so Sparkle's update panel opens behind
+            // whichever window is currently frontmost. Activate
+            // explicitly so the panel lands on top where the user
+            // expects it.
+            NSApp.activate(ignoringOtherApps: true)
+            self?.updater.checkForUpdates(nil)
+        }
         menuBar.onToggleWebcamPreview   = { [weak self] in self?.toggleWebcamPreview() }
         menuBar.onToggleTeleprompter    = { [weak self] in self?.toggleTeleprompter() }
         menuBar.onOpenRecording         = { [weak self] in self?.showOpenRecordingPanel() }
@@ -277,6 +286,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkey.register(.recordToggle) { [weak self] in
             Task { @MainActor in self?.toggleRecording() }
+        }
+        hotkey.register(.pauseToggle) { [weak self] in
+            Task { @MainActor in self?.togglePause() }
         }
 
         lastKnownCameraDeviceID = Settings.shared.cameraDeviceID
@@ -355,6 +367,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stopRecording()
         } else {
             chooseAndRecord()
+        }
+    }
+
+    /// Flip the paused state. No-ops when there's no recording in
+    /// flight — the menu item is hidden in that case, but the ⌘⇧P
+    /// key equivalent is live app-wide so we guard defensively.
+    private func togglePause() {
+        guard coordinator.isRecording else { return }
+        if coordinator.isPaused {
+            coordinator.resumeRecording()
+            menuBar.setPaused(false)
+        } else {
+            coordinator.pauseRecording()
+            menuBar.setPaused(true)
         }
     }
 

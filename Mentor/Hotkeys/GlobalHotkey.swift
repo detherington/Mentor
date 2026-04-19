@@ -3,28 +3,33 @@ import Carbon.HIToolbox
 
 enum HotkeyBinding {
     case recordToggle
+    case pauseToggle
 
     var keyCode: UInt32 {
         switch self {
         case .recordToggle: return UInt32(kVK_ANSI_R)
+        case .pauseToggle:  return UInt32(kVK_ANSI_P)
         }
     }
 
     var modifiers: UInt32 {
         switch self {
         case .recordToggle: return UInt32(cmdKey | shiftKey)
+        case .pauseToggle:  return UInt32(cmdKey | shiftKey)
         }
     }
 
     var signature: FourCharCode {
         switch self {
         case .recordToggle: return fourCharCode("MNTR")
+        case .pauseToggle:  return fourCharCode("MNTP")
         }
     }
 
     var id: UInt32 {
         switch self {
         case .recordToggle: return 1
+        case .pauseToggle:  return 2
         }
     }
 }

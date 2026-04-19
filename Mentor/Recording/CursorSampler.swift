@@ -33,6 +33,11 @@ final class CursorSampler: @unchecked Sendable {
     private var samples: [Sample] = []
     private var referenceUptime: TimeInterval = 0
     private var started = false
+    private var paused = false
+    /// Cumulative wall-clock time spent paused. Each captured
+    /// sample's `t` is computed as `uptime - reference - pausedOffset`
+    /// so post-resume samples sync with the retimed video frames.
+    private var pausedOffset: TimeInterval = 0
     // Small dedup: skip a sample if position + integer-rounded time
     // haven't changed from the previous. Keeps the log compact during
     // long idle periods where the cursor sits still.
@@ -62,6 +67,23 @@ final class CursorSampler: @unchecked Sendable {
         self.timer = timer
     }
 
+    /// Enter / exit the paused state. While paused, `tick()` skips
+    /// appending samples. On resume, `cumulativeOffsetSeconds` from
+    /// the coordinator is stamped in so subsequent samples' `t`
+    /// values stay aligned with retimed A/V frames.
+    func setPaused(_ newPaused: Bool, cumulativeOffsetSeconds: TimeInterval = 0) {
+        lock.lock()
+        paused = newPaused
+        if !newPaused {
+            pausedOffset = cumulativeOffsetSeconds
+            // Reset dedup state so the first post-resume sample
+            // always gets through even if the cursor hasn't moved.
+            lastX = .nan
+            lastY = .nan
+        }
+        lock.unlock()
+    }
+
     func stop() -> Log? {
         lock.lock()
         guard started else { lock.unlock(); return nil }
@@ -83,11 +105,13 @@ final class CursorSampler: @unchecked Sendable {
         // coordinate space EventRecorder uses for click positions, so
         // SourceCoordinateMapper can consume our samples directly.
         let loc = NSEvent.mouseLocation
-        let t = ProcessInfo.processInfo.systemUptime - referenceUptime
-        guard t >= 0, loc.x.isFinite, loc.y.isFinite else { return }
+        let rawUptime = ProcessInfo.processInfo.systemUptime
+        guard loc.x.isFinite, loc.y.isFinite else { return }
         lock.lock()
         defer { lock.unlock() }
-        if !started { return }
+        if !started || paused { return }
+        let t = rawUptime - referenceUptime - pausedOffset
+        guard t >= 0 else { return }
         // Skip duplicate positions — reduces log size during idle
         // stretches. `lastX`/`lastY` are compared in pt space; sub-px
         // jitter gets preserved for smooth interp but integer-stable
