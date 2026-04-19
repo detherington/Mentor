@@ -122,6 +122,11 @@ final class Settings {
         static let noiseReductionStyle = "noiseReductionStyle"
         /// Whether export writes a `.srt` sidecar alongside the MP4.
         static let exportSRTSidecar = "exportSRTSidecar"
+        /// Teleprompter script + scroll mode + display prefs.
+        static let teleprompterSettings = "teleprompterSettings"
+        /// Whether the Teleprompter window is currently shown
+        /// (persisted so it reopens across launches if left on).
+        static let teleprompterVisible = "teleprompterVisible"
         /// Per-lane timeline visibility overrides (auto/show/hide).
         static let timelineLanePrefs = "timelineLanePrefs"
 
@@ -313,6 +318,16 @@ final class Settings {
     var exportSRTSidecar: Bool {
         get { defaults.bool(forKey: Key.exportSRTSidecar) }
         set { defaults.set(newValue, forKey: Key.exportSRTSidecar); post() }
+    }
+
+    var teleprompterSettings: TeleprompterSettings? {
+        get { readJSON(Key.teleprompterSettings) }
+        set { writeJSON(newValue, forKey: Key.teleprompterSettings) }
+    }
+
+    var teleprompterVisible: Bool {
+        get { defaults.bool(forKey: Key.teleprompterVisible) }
+        set { defaults.set(newValue, forKey: Key.teleprompterVisible); post() }
     }
 
     var timelineLanePrefs: TimelineLanePrefs? {

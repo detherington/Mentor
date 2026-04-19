@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var webcamPreview: WebcamPreviewWindow?
     private var editorWindows: [EditorWindowController] = []
     private var recordingBorder: RecordingBorderWindow?
+    private var teleprompterController: TeleprompterController?
+    private var teleprompterWindow: TeleprompterWindow?
 
     private var settingsObserver: NSObjectProtocol?
     private var lastKnownCameraDeviceID: String?
@@ -267,6 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onShowSoundboard        = { [weak self] in self?.soundboardWindow.show() }
         menuBar.onCheckForUpdates       = { [weak self] in self?.updater.checkForUpdates(nil) }
         menuBar.onToggleWebcamPreview   = { [weak self] in self?.toggleWebcamPreview() }
+        menuBar.onToggleTeleprompter    = { [weak self] in self?.toggleTeleprompter() }
         menuBar.onOpenRecording         = { [weak self] in self?.showOpenRecordingPanel() }
         menuBar.onEditLastRecording     = { [weak self] in self?.editLastRecording() }
         menuBar.onQuit                  = { NSApp.terminate(nil) }
@@ -290,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             await self.startCameraSessionWithPermissions()
             self.refreshWebcamPreview()
+            self.refreshTeleprompter()
             self.checkAccessibilityPermission()
         }
 
@@ -383,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     self.menuBar.setRecording(true)
                     self.showRecordingBorder(for: source)
+                    self.attachTeleprompterMicTap()
                 }
             } catch {
                 await MainActor.run {
@@ -390,6 +395,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// When the teleprompter is visible AND a recording's in progress,
+    /// pipe mic samples to its controller so follow-voice mode has an
+    /// amplitude envelope to work with. Weak ref so detaching the sink
+    /// doesn't leak if the controller outlives the recording.
+    private func attachTeleprompterMicTap() {
+        guard let controller = teleprompterController else {
+            coordinator.micSampleSink = nil
+            return
+        }
+        coordinator.micSampleSink = { [weak controller] sample in
+            controller?.feedMicSample(sample)
+        }
+    }
+
+    private func detachTeleprompterMicTap() {
+        coordinator.micSampleSink = nil
     }
 
     private func showRecordingBorder(for source: CaptureSource) {
@@ -404,6 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopRecording() {
+        detachTeleprompterMicTap()
         Task {
             let finished = await coordinator.stopRecording()
             await MainActor.run {
@@ -453,6 +477,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             coordinator.reconfigureDevices()
         }
         refreshWebcamPreview()
+    }
+
+    // MARK: - Teleprompter
+
+    /// Flip the Teleprompter window's visibility. Stateless from the
+    /// user's perspective — just "show/hide", with the state persisted
+    /// in Settings so relaunches restore the last choice.
+    private func toggleTeleprompter() {
+        Settings.shared.teleprompterVisible.toggle()
+        refreshTeleprompter()
+    }
+
+    /// Apply the current `Settings.teleprompterVisible` flag: open or
+    /// close the window, wire the mic tap as appropriate. Called on
+    /// toggle, on app launch, and whenever the recording state changes
+    /// (so follow-voice gets mic input only while recording).
+    private func refreshTeleprompter() {
+        let shouldShow = Settings.shared.teleprompterVisible
+        if shouldShow {
+            if teleprompterController == nil {
+                teleprompterController = TeleprompterController()
+            }
+            if teleprompterWindow == nil, let controller = teleprompterController {
+                let window = TeleprompterWindow(controller: controller)
+                teleprompterWindow = window
+            }
+            teleprompterWindow?.orderFront(nil)
+            teleprompterController?.start()
+        } else {
+            teleprompterController?.stop()
+            teleprompterWindow?.orderOut(nil)
+            teleprompterWindow = nil
+            teleprompterController = nil
+        }
+        menuBar.setTeleprompterShown(shouldShow)
+        // Re-evaluate the mic tap — follow-voice only has meaningful
+        // data while a recording's in progress, but we leave the
+        // controller alive for the user to edit their script at any
+        // time. Lifecycle of the actual mic-tap wiring is managed in
+        // the recording start/stop hooks below.
     }
 
     // MARK: - Webcam preview

@@ -25,6 +25,19 @@ final class CaptureCoordinator: @unchecked Sendable {
     /// sync with the main capture session.
     var soundboard: SoundboardController?
 
+    /// Optional mic-sample sink. When non-nil, every mic sample buffer
+    /// is tee'd to this closure in addition to the mic writer. Used by
+    /// the teleprompter's follow-voice mode to compute a live amplitude
+    /// envelope without duplicating the capture pipeline. Set + unset
+    /// by `AppDelegate` around the lifecycle of whoever needs it;
+    /// closure runs on the mic capture queue and MUST NOT block.
+    private let micTapLock = NSLock()
+    private var _micSampleSink: ((CMSampleBuffer) -> Void)?
+    var micSampleSink: ((CMSampleBuffer) -> Void)? {
+        get { micTapLock.lock(); defer { micTapLock.unlock() }; return _micSampleSink }
+        set { micTapLock.lock(); _micSampleSink = newValue; micTapLock.unlock() }
+    }
+
     private let screenCapture = ScreenCapture()
 
     private let stateLock = NSLock()
@@ -406,5 +419,15 @@ extension CaptureCoordinator: CameraCaptureDelegate {
         let micWriter = self.micAudioWriter
         pipelineLock.unlock()
         micWriter?.append(sample)
+
+        // Tee to any attached live-amplitude sink (e.g. the
+        // teleprompter's follow-voice mode). Read the closure
+        // reference under lock so AppDelegate can swap it safely
+        // from the main actor; invoke outside the lock so a slow
+        // consumer can't stall mic delivery.
+        micTapLock.lock()
+        let sink = _micSampleSink
+        micTapLock.unlock()
+        sink?(sample)
     }
 }

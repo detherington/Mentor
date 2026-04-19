@@ -12,6 +12,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onShowSettings: () -> Void = {}
     var onShowSoundboard: () -> Void = {}
     var onToggleWebcamPreview: () -> Void = {}
+    var onToggleTeleprompter: () -> Void = {}
     var onOpenRecording: () -> Void = {}
     var onEditLastRecording: () -> Void = {}
     var onCheckForUpdates: () -> Void = {}
@@ -22,6 +23,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private var startStopItem: NSMenuItem!
     private var webcamPreviewItem: NSMenuItem!
+    private var teleprompterItem: NSMenuItem!
     private var micLevelItem: NSMenuItem!
     private var micLevelView: MicLevelView!
 
@@ -66,6 +68,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         )
         webcamPreviewItem.target = self
         menu.addItem(webcamPreviewItem)
+
+        teleprompterItem = NSMenuItem(
+            title: "Show Teleprompter",
+            action: #selector(handleToggleTeleprompter(_:)),
+            keyEquivalent: ""
+        )
+        teleprompterItem.target = self
+        menu.addItem(teleprompterItem)
 
         let revealItem = NSMenuItem(
             title: "Reveal Recordings in Finder",
@@ -155,6 +165,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         webcamPreviewItem.title = shown ? "Hide Webcam Preview" : "Show Webcam Preview"
     }
 
+    func setTeleprompterShown(_ shown: Bool) {
+        teleprompterItem.title = shown ? "Hide Teleprompter" : "Show Teleprompter"
+    }
+
     /// Toggle the "Finalizing…" indicator shown in the menu bar between
     /// recording stop and final-MP4 render completion.
     func setFinalizing(_ finalizing: Bool) {
@@ -196,6 +210,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func handleSoundboard(_ sender: Any?) { onShowSoundboard() }
     @objc private func handleCheckUpdates(_ sender: Any?) { onCheckForUpdates() }
     @objc private func handleToggleWebcamPreview(_ sender: Any?) { onToggleWebcamPreview() }
+    @objc private func handleToggleTeleprompter(_ sender: Any?)  { onToggleTeleprompter() }
     @objc private func handleOpenRecording(_ sender: Any?) { onOpenRecording() }
     @objc private func handleEditLast(_ sender: Any?) { onEditLastRecording() }
     @objc private func handleQuit(_ sender: Any?) { onQuit() }
