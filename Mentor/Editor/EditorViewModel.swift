@@ -1386,10 +1386,14 @@ final class EditorViewModel {
     }
 
     private func applyLayout() {
-        // While an export is running, the render pipeline owns the shared
-        // compositor state — any mid-flight mutation would show up as a
-        // visible layout change partway through the output file.
-        guard !isExporting else { return }
+        // While ANY render is running, the compositor's shared state
+        // belongs to that render. `isExporting` covers our own
+        // editor-initiated exports; `FinalRenderer.isRendering` covers
+        // app-level renders too, notably the auto-bake that kicks off
+        // right after stopRecording. Without the second check the
+        // editor could mid-flight flip something like
+        // `webcamBackgroundStyle.mode` in the auto-rendered MP4.
+        guard !isExporting, !FinalRenderer.isRendering else { return }
         LiveCompositor.state.update(
             position: webcamPosition,
             shape: webcamShape,

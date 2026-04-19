@@ -28,6 +28,55 @@ enum FinalRenderer {
         }
     }
 
+    /// Global "a render is in flight" flag. The compositor state
+    /// `LiveCompositor.state` is a singleton; whichever code path
+    /// writes to it last wins. That's fine when there's only one
+    /// consumer, but `renderUsingCaptureLayout` (auto-baked MP4 right
+    /// after stopping a recording) and any open editor's
+    /// `applyLayout()` can race if the user opens an editor for a
+    /// *different* recording while the auto-render of the new one is
+    /// still running — editor writes pollute the render's state and
+    /// settings like `webcamBackgroundStyle` flip mid-video.
+    ///
+    /// Callers (here + `EditorViewModel.applyLayout`) check this flag
+    /// and skip pushing updates while a render is active. One-render-
+    /// at-a-time behaviour is also enforced by `renderLock` below.
+    private static let renderLock = NSLock()
+    nonisolated(unsafe) private static var _isRendering: Bool = false
+    static var isRendering: Bool {
+        renderLock.lock(); defer { renderLock.unlock() }
+        return _isRendering
+    }
+
+    /// Run `body` inside a guarded "render is in flight" window.
+    /// Serialises multiple renders and surfaces `isRendering == true`
+    /// to other code paths (specifically `EditorViewModel`) so they
+    /// skip compositor-state writes while we've got the singleton
+    /// committed to our layout.
+    private static func withRenderLock<T>(_ body: () async throws -> T) async rethrows -> T {
+        // Busy-wait with a short sleep rather than a continuation
+        // queue — we don't expect contention to be common (auto-
+        // render happens serially after recording ends, and editor
+        // exports are user-triggered), so the simple version is
+        // plenty and avoids a structured-continuation dance.
+        while true {
+            renderLock.lock()
+            if !_isRendering {
+                _isRendering = true
+                renderLock.unlock()
+                break
+            }
+            renderLock.unlock()
+            try? await Task.sleep(nanoseconds: 50_000_000)  // 50 ms
+        }
+        defer {
+            renderLock.lock()
+            _isRendering = false
+            renderLock.unlock()
+        }
+        return try await body()
+    }
+
     /// Webcam-overlay parameters used by the renderer. Independent of the
     /// capture-time metadata, so the editor can pass user-modified layouts.
     struct ExportLayout {
@@ -158,6 +207,34 @@ enum FinalRenderer {
         trimMap: TrimMap? = nil,
         outputURL: URL,
         progress: ((Float) -> Void)? = nil
+    ) async throws -> URL {
+        // Serialise all renders through the shared lock — while we're
+        // inside this block `isRendering` is true, which causes any
+        // open editor's `applyLayout()` to skip writing to
+        // `LiveCompositor.state`. Prevents the "auto-render picks up
+        // whatever the editor happened to type last" bug.
+        try await withRenderLock {
+            try await runRender(
+                bundle: bundle,
+                metadata: metadata,
+                layout: layout,
+                trimMap: trimMap,
+                outputURL: outputURL,
+                progress: progress
+            )
+        }
+    }
+
+    /// Actual render body — extracted from `render(...)` so the
+    /// render-lock wrapper above stays short + obvious. Everything in
+    /// here assumes exclusive access to `LiveCompositor.state`.
+    private static func runRender(
+        bundle: RecordingBundle,
+        metadata: RecordingMetadata,
+        layout: ExportLayout,
+        trimMap: TrimMap?,
+        outputURL: URL,
+        progress: ((Float) -> Void)?
     ) async throws -> URL {
         // Prime the compositor's shared state. NOTE: the compositor reads
         // this state per frame, so callers must avoid racing mutations

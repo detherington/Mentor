@@ -26,6 +26,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var teleprompterItem: NSMenuItem!
     private var micLevelItem: NSMenuItem!
     private var micLevelView: MicLevelView!
+    // Warning item — hidden unless `CaptureContention.detectedOffenders()`
+    // returns a non-empty list when the menu opens. Kept as a persistent
+    // NSMenuItem so we don't rebuild the menu on every open.
+    private var contentionWarningItem: NSMenuItem!
+    private var contentionSeparatorItem: NSMenuItem!
+    private var detectedOffenders: [CaptureContention.KnownOffender] = []
 
     private var durationTimer: Timer?
     private var micPollTimer: Timer?
@@ -50,6 +56,22 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         startStopItem.keyEquivalentModifierMask = [.command, .shift]
         startStopItem.target = self
         menu.addItem(startStopItem)
+
+        // Contention warning — sits right under Start Recording so
+        // users see it just as they're about to hit record. Both the
+        // warning item and its separator are hidden by default and
+        // toggled together by `menuWillOpen`.
+        contentionWarningItem = NSMenuItem(
+            title: "",  // filled in at open time
+            action: #selector(handleContentionWarning(_:)),
+            keyEquivalent: ""
+        )
+        contentionWarningItem.target = self
+        contentionWarningItem.isHidden = true
+        menu.addItem(contentionWarningItem)
+        contentionSeparatorItem = .separator()
+        contentionSeparatorItem.isHidden = true
+        menu.addItem(contentionSeparatorItem)
 
         menu.addItem(.separator())
 
@@ -219,10 +241,75 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         startMicPolling()
+        refreshContentionWarning()
     }
 
     func menuDidClose(_ menu: NSMenu) {
         stopMicPolling()
+    }
+
+    /// Recheck which known always-on mic/camera apps are currently
+    /// running and update the warning item's visibility + label. Called
+    /// each time the user opens the menu so the check is always fresh
+    /// without burning background cycles.
+    private func refreshContentionWarning() {
+        let offenders = CaptureContention.detectedOffenders()
+        detectedOffenders = offenders
+        if offenders.isEmpty {
+            contentionWarningItem.isHidden = true
+            contentionSeparatorItem.isHidden = true
+            return
+        }
+        contentionWarningItem.isHidden = false
+        contentionSeparatorItem.isHidden = false
+        let count = offenders.count
+        let suffix = count == 1 ? "app" : "apps"
+        contentionWarningItem.title = "⚠︎ \(count) \(suffix) may cause capture lag — click to review"
+    }
+
+    @objc private func handleContentionWarning(_ sender: Any?) {
+        guard !detectedOffenders.isEmpty else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Other apps may be using your mic or camera"
+        // Two-paragraph explanation: what's happening, then why it
+        // matters, then what to do. Keeps the window short but
+        // answers "so what?" without needing a docs link.
+        let intro = """
+        These apps are currently running and are known to hold the \
+        microphone or camera even when you're not actively using them. \
+        When Mentor tries to capture, macOS's AV subsystem splits \
+        priority between everyone — the result is stuttery webcam \
+        preview, occasional audio crackle, or dropped frames in the \
+        recording itself.
+
+        Quitting the apps you don't need right now will give Mentor \
+        exclusive access to the capture pipeline and smooth out the \
+        recording. You can relaunch them after you're done.
+        """
+        let list = detectedOffenders
+            .map { "  •  \($0.name) — holds \($0.holds)" }
+            .joined(separator: "\n")
+        alert.informativeText = "\(intro)\n\n\(list)"
+        alert.addButton(withTitle: "Quit Those Apps…")
+        alert.addButton(withTitle: "Ignore for Now")
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        // Quit each offending process we can locate. `terminate()`
+        // asks nicely; apps with unsaved work may prompt. That's fine
+        // — the user just asked to quit them, so their save dialog
+        // is the expected flow.
+        let offenderBundleIDs = Set(
+            CaptureContention.knownOffenders
+                .filter { offender in
+                    detectedOffenders.contains(where: { $0.name == offender.name })
+                }
+                .map(\.bundleID)
+        )
+        for app in NSWorkspace.shared.runningApplications {
+            guard let id = app.bundleIdentifier, offenderBundleIDs.contains(id) else { continue }
+            app.terminate()
+        }
     }
 
     // MARK: - Internals

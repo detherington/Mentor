@@ -27,6 +27,10 @@ enum TeleprompterScrollMode: String, Codable, Equatable, CaseIterable, Identifia
 }
 
 /// User-facing teleprompter configuration. Persisted across sessions.
+/// Custom `init(from:)` below uses `decodeIfPresent` for newer fields
+/// so old v1.0.6 saves (which only have the original six properties)
+/// decode cleanly + pick up defaults for anything added later — the
+/// user's saved script, mode, and WPM survive version upgrades.
 struct TeleprompterSettings: Codable, Equatable, Sendable {
     /// Currently loaded script. Free-form text; scrolls top to bottom.
     var script: String
@@ -44,6 +48,20 @@ struct TeleprompterSettings: Codable, Equatable, Sendable {
     /// Mirror the text horizontally for a through-the-glass rig. Rare
     /// but harmless to support.
     var mirrored: Bool
+    /// Opacity of the window chrome + reading-area background. The
+    /// script text itself stays fully opaque at every setting.
+    /// 1.0 = current solid look; 0.0 = only the text is visible and
+    /// everything behind the panel reads through. Cheap — it's just
+    /// alpha compositing on existing layers, no extra render work.
+    var backgroundOpacity: CGFloat
+    /// Script-text colour in sRGB. Defaults to a warm near-white
+    /// that reads comfortably at the default background opacity
+    /// against both dark-material and see-through backdrops. Users
+    /// commonly drop to black for light rooms or pick a tinted
+    /// colour to match their brand.
+    var textRed: CGFloat
+    var textGreen: CGFloat
+    var textBlue: CGFloat
 
     static let `default` = TeleprompterSettings(
         script: "",
@@ -51,8 +69,60 @@ struct TeleprompterSettings: Codable, Equatable, Sendable {
         wordsPerMinute: 150,
         fontSize: 36,
         lineWidthFraction: 0.85,
-        mirrored: false
+        mirrored: false,
+        backgroundOpacity: 1.0,
+        textRed: 0.96,
+        textGreen: 0.96,
+        textBlue: 0.92
     )
+
+    init(
+        script: String,
+        mode: TeleprompterScrollMode,
+        wordsPerMinute: Int,
+        fontSize: CGFloat,
+        lineWidthFraction: CGFloat,
+        mirrored: Bool,
+        backgroundOpacity: CGFloat,
+        textRed: CGFloat,
+        textGreen: CGFloat,
+        textBlue: CGFloat
+    ) {
+        self.script = script
+        self.mode = mode
+        self.wordsPerMinute = wordsPerMinute
+        self.fontSize = fontSize
+        self.lineWidthFraction = lineWidthFraction
+        self.mirrored = mirrored
+        self.backgroundOpacity = backgroundOpacity
+        self.textRed = textRed
+        self.textGreen = textGreen
+        self.textBlue = textBlue
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case script, mode, wordsPerMinute, fontSize, lineWidthFraction, mirrored, backgroundOpacity
+        case textRed, textGreen, textBlue
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.script = try c.decode(String.self, forKey: .script)
+        self.mode = try c.decode(TeleprompterScrollMode.self, forKey: .mode)
+        self.wordsPerMinute = try c.decode(Int.self, forKey: .wordsPerMinute)
+        self.fontSize = try c.decode(CGFloat.self, forKey: .fontSize)
+        self.lineWidthFraction = try c.decode(CGFloat.self, forKey: .lineWidthFraction)
+        self.mirrored = try c.decode(Bool.self, forKey: .mirrored)
+        // Added after v1.0.6 — default to fully opaque when loading
+        // older saves so the visible appearance is unchanged.
+        self.backgroundOpacity = try c.decodeIfPresent(CGFloat.self, forKey: .backgroundOpacity) ?? 1.0
+        // Text colour added alongside opacity; fall back to the same
+        // warm near-white as `.default` so reopened pre-v1.0.7 saves
+        // don't suddenly render black text on a dark material.
+        self.textRed   = try c.decodeIfPresent(CGFloat.self, forKey: .textRed)   ?? 0.96
+        self.textGreen = try c.decodeIfPresent(CGFloat.self, forKey: .textGreen) ?? 0.96
+        self.textBlue  = try c.decodeIfPresent(CGFloat.self, forKey: .textBlue)  ?? 0.92
+    }
 }
 
 /// Runtime controller for the teleprompter. Owns the currently-visible

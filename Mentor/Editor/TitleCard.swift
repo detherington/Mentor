@@ -18,6 +18,16 @@ struct TitleCard: Equatable, Codable, Sendable {
     var backgroundColor: ColorRGBA
     /// Length of the cross-fade between card and recording, in seconds.
     var fadeDuration: TimeInterval
+    /// Font family name for the title + subtitle. Nil = macOS system
+    /// font (SF Pro Display). Picking a family here replaces the
+    /// typeface wholesale; weight logic (bold title / regular
+    /// subtitle) is preserved via `NSFontManager`.
+    var fontName: String?
+    /// Filename (not a full path) of a user-chosen background image
+    /// living under `TitleCardAssets.directory`. When non-nil and
+    /// the file exists, the renderer aspect-fills this image over
+    /// `backgroundColor`. Otherwise the solid colour wins.
+    var backgroundImageFilename: String?
 
     static let defaultStart = TitleCard(
         enabled: false,
@@ -25,7 +35,9 @@ struct TitleCard: Equatable, Codable, Sendable {
         subtitle: "",
         textColor: .white,
         backgroundColor: ColorRGBA(red: 0.07, green: 0.07, blue: 0.10, alpha: 1.0),
-        fadeDuration: 2.0
+        fadeDuration: 2.0,
+        fontName: nil,
+        backgroundImageFilename: nil
     )
 
     static let defaultEnd = TitleCard(
@@ -34,7 +46,9 @@ struct TitleCard: Equatable, Codable, Sendable {
         subtitle: "",
         textColor: .white,
         backgroundColor: ColorRGBA(red: 0.07, green: 0.07, blue: 0.10, alpha: 1.0),
-        fadeDuration: 2.0
+        fadeDuration: 2.0,
+        fontName: nil,
+        backgroundImageFilename: nil
     )
 
     /// Hash that ignores `enabled` + `fadeDuration` (those don't affect the
@@ -46,7 +60,204 @@ struct TitleCard: Equatable, Codable, Sendable {
         hasher.combine(subtitle)
         hasher.combine(textColor)
         hasher.combine(backgroundColor)
+        hasher.combine(fontName)
+        hasher.combine(backgroundImageFilename)
         return hasher.finalize()
+    }
+
+    // MARK: - Codable with backward compatibility
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, title, subtitle, textColor, backgroundColor, fadeDuration
+        case fontName, backgroundImageFilename
+    }
+
+    init(
+        enabled: Bool,
+        title: String,
+        subtitle: String,
+        textColor: ColorRGBA,
+        backgroundColor: ColorRGBA,
+        fadeDuration: TimeInterval,
+        fontName: String? = nil,
+        backgroundImageFilename: String? = nil
+    ) {
+        self.enabled = enabled
+        self.title = title
+        self.subtitle = subtitle
+        self.textColor = textColor
+        self.backgroundColor = backgroundColor
+        self.fadeDuration = fadeDuration
+        self.fontName = fontName
+        self.backgroundImageFilename = backgroundImageFilename
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled        = try c.decode(Bool.self,           forKey: .enabled)
+        self.title          = try c.decode(String.self,         forKey: .title)
+        self.subtitle       = try c.decode(String.self,         forKey: .subtitle)
+        self.textColor      = try c.decode(ColorRGBA.self,      forKey: .textColor)
+        self.backgroundColor = try c.decode(ColorRGBA.self,     forKey: .backgroundColor)
+        self.fadeDuration   = try c.decode(TimeInterval.self,   forKey: .fadeDuration)
+        // Both added post-v1.0.6. Absent fields map to "system
+        // default font, no background image" so old saved cards
+        // keep looking exactly the way the user left them.
+        self.fontName               = try c.decodeIfPresent(String.self, forKey: .fontName)
+        self.backgroundImageFilename = try c.decodeIfPresent(String.self, forKey: .backgroundImageFilename)
+    }
+}
+
+// MARK: - System font catalog
+
+/// Curated list of families that make good title-card fonts on
+/// macOS. Stored as family names so the renderer can ask
+/// NSFontManager for bold/regular variants at draw time. `name == nil`
+/// represents the OS-default system font (SF Pro Display).
+enum TitleCardFont {
+    struct Option: Identifiable, Hashable {
+        /// Nil → use the built-in `NSFont.systemFont(ofSize:weight:)`
+        /// which tracks whichever system typeface the running macOS
+        /// picks. All other values are PostScript family names
+        /// passed to `NSFontManager`.
+        let familyName: String?
+        /// Display label shown in the inspector picker.
+        let label: String
+        var id: String { familyName ?? "<system>" }
+    }
+
+    /// Options are ordered by how commonly they're used on title
+    /// cards — system first, then sans, then serif, then mono.
+    static let options: [Option] = [
+        Option(familyName: nil,                  label: "System"),
+        Option(familyName: "Helvetica Neue",     label: "Helvetica Neue"),
+        Option(familyName: "Avenir Next",        label: "Avenir Next"),
+        Option(familyName: "Futura",             label: "Futura"),
+        Option(familyName: "Gill Sans",          label: "Gill Sans"),
+        Option(familyName: "Optima",             label: "Optima"),
+        Option(familyName: "Georgia",            label: "Georgia"),
+        Option(familyName: "Times New Roman",    label: "Times New Roman"),
+        Option(familyName: "New York",           label: "New York (Serif)"),
+        Option(familyName: "Baskerville",        label: "Baskerville"),
+        Option(familyName: "Menlo",              label: "Menlo (Mono)"),
+        Option(familyName: "Courier New",        label: "Courier New"),
+    ]
+
+    /// Build the title NSFont (bold) for a given family name + size.
+    /// Falls back to the system font if the family isn't available
+    /// on this machine — keeps cards renderable even if the user
+    /// ships settings between Macs that have different font sets.
+    static func titleFont(name: String?, size: CGFloat) -> NSFont {
+        guard let name else { return .systemFont(ofSize: size, weight: .bold) }
+        // New York is a system design variant — not a normal family
+        // lookup. Resolve via NSFontDescriptor's `.withDesign(.serif)`.
+        if name == "New York" {
+            let base = NSFont.systemFont(ofSize: size, weight: .bold)
+            if let serifDescriptor = base.fontDescriptor.withDesign(.serif),
+               let font = NSFont(descriptor: serifDescriptor, size: size) {
+                return font
+            }
+            return base
+        }
+        if let bold = NSFontManager.shared.font(
+            withFamily: name,
+            traits: .boldFontMask,
+            weight: 5,
+            size: size
+        ) {
+            return bold
+        }
+        return .systemFont(ofSize: size, weight: .bold)
+    }
+
+    /// Build the subtitle NSFont (regular weight). Matches the
+    /// family chosen for the title; subtitle weight is always
+    /// regular so the title has visual priority.
+    static func subtitleFont(name: String?, size: CGFloat) -> NSFont {
+        guard let name else { return .systemFont(ofSize: size, weight: .regular) }
+        if name == "New York" {
+            let base = NSFont.systemFont(ofSize: size, weight: .regular)
+            if let serifDescriptor = base.fontDescriptor.withDesign(.serif),
+               let font = NSFont(descriptor: serifDescriptor, size: size) {
+                return font
+            }
+            return base
+        }
+        if let regular = NSFontManager.shared.font(
+            withFamily: name,
+            traits: [],
+            weight: 5,
+            size: size
+        ) {
+            return regular
+        }
+        return .systemFont(ofSize: size, weight: .regular)
+    }
+}
+
+// MARK: - System font-panel bridge
+
+/// Bridges SwiftUI's title-card font picker to the full macOS
+/// `NSFontPanel`. Needed because the panel uses the responder-chain
+/// `changeFont(_:)` pattern, which SwiftUI alone can't satisfy — we
+/// need an `@objc`-visible target that receives the message and
+/// forwards the newly-selected family name to the caller.
+///
+/// Singleton because the font panel is a process-wide resource and
+/// `NSFontManager.shared.target` only accepts one target at a time.
+/// Each `present(...)` call overwrites the previous callback, so a
+/// second card editor opening the panel simply takes over.
+@MainActor
+final class TitleCardFontPanelBridge: NSObject {
+    static let shared = TitleCardFontPanelBridge()
+
+    /// Reference font for the current session. Passed to
+    /// `NSFontManager.convert(_:)` on each `changeFont` so the manager
+    /// can apply the user's selection on top of it. Starts as the
+    /// card's current family, updated on each change so back-to-back
+    /// family + weight tweaks compound instead of resetting.
+    private var referenceFont: NSFont = .systemFont(ofSize: 24)
+    private var onPicked: ((String) -> Void)?
+
+    /// Open (or raise) the system font panel. Current `familyName`
+    /// pre-selects the matching row in the panel's typeface list.
+    /// `onPicked` fires every time the user changes the selection
+    /// — modeless, so the user can browse and the card updates live.
+    func present(currentFamily familyName: String?, onPicked: @escaping (String) -> Void) {
+        self.onPicked = onPicked
+        if let familyName {
+            self.referenceFont = NSFontManager.shared.font(
+                withFamily: familyName,
+                traits: .boldFontMask,
+                weight: 5,
+                size: 24
+            ) ?? .systemFont(ofSize: 24, weight: .bold)
+        } else {
+            self.referenceFont = .systemFont(ofSize: 24, weight: .bold)
+        }
+        NSFontManager.shared.target = self
+        NSFontManager.shared.setSelectedFont(referenceFont, isMultiple: false)
+        NSApp.activate(ignoringOtherApps: true)
+        NSFontPanel.shared.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func changeFont(_ sender: Any?) {
+        let manager = NSFontManager.shared
+        let newFont = manager.convert(referenceFont)
+        referenceFont = newFont
+        let family = newFont.familyName ?? newFont.fontName
+        onPicked?(family)
+    }
+
+    /// Restrict the panel to the parts relevant for a card — font
+    /// family, face (weight), and size preview. Hides effects,
+    /// colour, and shadow controls that don't map to our renderer.
+    @objc func validModesForFontPanel(_ fontPanel: NSFontPanel) -> Int {
+        return Int(
+            NSFontPanel.ModeMask.collection.rawValue
+            | NSFontPanel.ModeMask.face.rawValue
+            | NSFontPanel.ModeMask.size.rawValue
+        )
     }
 }
 
@@ -107,10 +318,38 @@ enum TitleCardRenderer {
             return nil
         }
 
-        // 1. Fill background.
+        // 1. Fill background. Solid colour is always drawn first so
+        // transparent / non-filling images composite over a known
+        // backdrop instead of whatever colour the CGContext happened
+        // to start with.
         let bounds = CGRect(x: 0, y: 0, width: w, height: h)
         ctx.setFillColor(card.backgroundColor.cgColor)
         ctx.fill(bounds)
+
+        // 1a. Optional background image — aspect-fill over the whole
+        // card. Missing / unreadable files silently fall through to
+        // the solid colour we already drew, so a deleted image file
+        // doesn't produce a blank card.
+        if let filename = card.backgroundImageFilename,
+           !filename.isEmpty,
+           let image = NSImage(contentsOf: TitleCardAssets.url(for: filename)),
+           let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            let imgW = CGFloat(cg.width)
+            let imgH = CGFloat(cg.height)
+            let outW = CGFloat(w)
+            let outH = CGFloat(h)
+            // Aspect-fill: scale so the image covers the canvas,
+            // crop whichever axis overflows.
+            let scale = max(outW / imgW, outH / imgH)
+            let drawW = imgW * scale
+            let drawH = imgH * scale
+            let dx = (outW - drawW) / 2
+            let dy = (outH - drawH) / 2
+            ctx.saveGState()
+            ctx.interpolationQuality = .high
+            ctx.draw(cg, in: CGRect(x: dx, y: dy, width: drawW, height: drawH))
+            ctx.restoreGState()
+        }
 
         // 2. Compose attributed strings. Sizes scale with canvas height so
         // a 4K render and a 1080p render both look proportionally right.
@@ -120,12 +359,12 @@ enum TitleCardRenderer {
 
         let title = makeAttributedString(
             text: card.title,
-            font: NSFont.systemFont(ofSize: titleSize, weight: .bold),
+            font: TitleCardFont.titleFont(name: card.fontName, size: titleSize),
             color: card.textColor.cgColor
         )
         let subtitle = card.subtitle.isEmpty ? nil : makeAttributedString(
             text: card.subtitle,
-            font: NSFont.systemFont(ofSize: subtitleSize, weight: .regular),
+            font: TitleCardFont.subtitleFont(name: card.fontName, size: subtitleSize),
             color: ColorRGBA(
                 red: card.textColor.red,
                 green: card.textColor.green,
