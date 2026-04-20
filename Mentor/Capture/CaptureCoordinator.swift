@@ -133,8 +133,13 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     func startRecording(source: CaptureSource) async throws {
-        let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2.0 }
-        let outputSize = source.pixelSize(scale: scale)
+        let (outputSize, scale): (CGSize, CGFloat) = try await MainActor.run {
+            guard let size = source.outputPixelSize() else {
+                throw CaptureError.writerSetupFailed("source has no capturable area")
+            }
+            return (size, source.backingScale())
+        }
+        MentorDebug.log("COORD: startRecording source=\(source.displayName) outputSize=\(Int(outputSize.width))x\(Int(outputSize.height)) scale=\(scale)")
         let dir = Self.outputDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let bundle = RecordingBundle.make(baseDirectory: dir)
@@ -150,20 +155,29 @@ final class CaptureCoordinator: @unchecked Sendable {
             averageBitrate: 8_000_000,
             expectedFrameRate: 60
         )
-        let webcamRaw = try RawTrackWriter(
-            outputURL: bundle.webcamVideoURL,
-            pixelSize: cameraCapture.sourcePixelSize,
-            averageBitrate: 4_000_000,
-            expectedFrameRate: 30
-        )
+        // Webcam writer only spins up when the session actually has a
+        // video input. Mic writer only spins up when the session is
+        // configured at all (configure() succeeds if either video or
+        // audio was found). Creating either writer with no inputs
+        // produces empty MOV/M4A files that AVFoundation later refuses
+        // to open, so the cleaner path is to skip them entirely and
+        // let the editor/renderer treat the track as absent.
+        let webcamRaw: RawTrackWriter? = cameraCapture.hasVideoInput
+            ? try RawTrackWriter(
+                outputURL: bundle.webcamVideoURL,
+                pixelSize: cameraCapture.sourcePixelSize,
+                averageBitrate: 4_000_000,
+                expectedFrameRate: 30
+            )
+            : nil
 
-        // Audio writers (sidecar m4a files — replaces the old composited
-        // recorder's audio tracks).
-        let micWriter = try AudioWriter(
-            outputURL: bundle.micAudioURL,
-            channels: 1,
-            bitrate: 128_000
-        )
+        let micWriter: AudioWriter? = cameraCapture.isConfigured
+            ? try AudioWriter(
+                outputURL: bundle.micAudioURL,
+                channels: 1,
+                bitrate: 128_000
+            )
+            : nil
         let systemWriter: AudioWriter? = captureSysAudio
             ? try AudioWriter(
                 outputURL: bundle.systemAudioURL,
@@ -238,8 +252,8 @@ final class CaptureCoordinator: @unchecked Sendable {
             self.currentMetadata = nil
             pipelineLock.unlock()
             _ = await screenRaw.finish()
-            _ = await webcamRaw.finish()
-            _ = await micWriter.finish()
+            _ = await webcamRaw?.finish()
+            _ = await micWriter?.finish()
             _ = await systemWriter?.finish()
             _ = eventRec.stop()
             _ = cursorSamp.stop()

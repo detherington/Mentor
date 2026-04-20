@@ -164,6 +164,18 @@ final class WebcamPreviewWindow: NSPanel {
         }
     }
 
+    /// Drop the currently-displayed frame and reveal the black backing
+    /// layer. Called when the camera is disconnected so the preview
+    /// doesn't sit on a stale freeze-frame.
+    func clear() {
+        DispatchQueue.main.async {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.contentsLayer.contents = nil
+            CATransaction.commit()
+        }
+    }
+
     private func renderCGImage(
         from pixelBuffer: CVPixelBuffer,
         diameterPx: CGFloat,

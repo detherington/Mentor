@@ -50,25 +50,39 @@ final class RawTrackWriter: @unchecked Sendable {
 
         try? FileManager.default.removeItem(at: outputURL)
 
+        // H.264 requires positive, even width/height. AVAssetWriterInput's
+        // validator throws NSInvalidArgumentException on odd/zero dims and
+        // that exception is uncatchable from Swift (process aborts). Fail
+        // cleanly here instead.
+        let width = Int(pixelSize.width)
+        let height = Int(pixelSize.height)
+        guard width > 0, height > 0, width % 2 == 0, height % 2 == 0 else {
+            throw CaptureError.writerSetupFailed(
+                "invalid pixel size \(width)x\(height) for \(outputURL.lastPathComponent)"
+            )
+        }
+
         do {
             writer = try AVAssetWriter(url: outputURL, fileType: .mov)
         } catch {
             throw CaptureError.writerSetupFailed("raw writer \(outputURL.lastPathComponent): \(error.localizedDescription)")
         }
 
-        // Baseline profile + no frame reordering: removes B-frame encoding
-        // work. Frame-rate hints help the encoder plan rate control. Lower
-        // bitrate reduces entropy coding / rate-control CPU work. All of
-        // this reduces media-engine throughput demand so two concurrent
-        // real-time encoders fit comfortably within one media engine.
+        // High profile + no frame reordering: higher max level than
+        // Baseline (Baseline auto-level tops out well before 4K on
+        // Apple Silicon's H.264 hardware encoder and rejects anything
+        // larger with an uncatchable NSInvalidArgument). Frame
+        // reordering off keeps per-frame latency at zero so two
+        // concurrent real-time encoders still fit within one media
+        // engine. Frame-rate hints let the encoder plan rate control.
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: Int(pixelSize.width),
-            AVVideoHeightKey: Int(pixelSize.height),
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: averageBitrate,
                 AVVideoMaxKeyFrameIntervalKey: expectedFrameRate * 2,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264BaselineAutoLevel,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoAllowFrameReorderingKey: false,
                 AVVideoExpectedSourceFrameRateKey: expectedFrameRate,
                 AVVideoAverageNonDroppableFrameRateKey: expectedFrameRate

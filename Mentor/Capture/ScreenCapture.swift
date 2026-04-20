@@ -34,8 +34,10 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
     private var noImageBufferCount: Int = 0 // frames with no pixel buffer
 
     func start(source: CaptureSource, captureSystemAudio: Bool) async throws {
-        let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2.0 }
-        let size = source.pixelSize(scale: scale)
+        let resolved: CGSize? = await MainActor.run { source.outputPixelSize() }
+        guard let size = resolved else {
+            throw CaptureError.writerSetupFailed("source has no capturable area")
+        }
         pixelSize = size
 
         let config = SCStreamConfiguration()

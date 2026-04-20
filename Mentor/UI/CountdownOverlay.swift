@@ -11,8 +11,8 @@ final class CountdownOverlay {
     private var beepEnabled: Bool = false
     private var showGo: Bool = false
 
-    func show(seconds: Int, onComplete: @escaping () -> Void) {
-        guard seconds > 0, let screen = NSScreen.main else {
+    func show(seconds: Int, on targetScreen: NSScreen? = nil, onComplete: @escaping () -> Void) {
+        guard seconds > 0, let screen = targetScreen ?? NSScreen.main else {
             onComplete()
             return
         }
@@ -35,8 +35,20 @@ final class CountdownOverlay {
         win.backgroundColor = .clear
         win.level = .screenSaver
         win.ignoresMouseEvents = true
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        // `.fullScreenAuxiliary` lets the panel stay visible when the
+        // target screen has an app running in full-screen Space, which
+        // is a common "I'm about to record this" scenario. Matches the
+        // recording-border configuration.
+        win.collectionBehavior = [
+            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary
+        ]
         win.hasShadow = false
+        // On multi-display setups the `contentRect:` passed to `init` is
+        // sometimes adjusted away from the target screen's global
+        // origin (AppKit treats it as a "suggestion"). Force the frame
+        // back to `screen.frame` before ordering front so the panel
+        // lands on the display the user's actually recording.
+        win.setFrame(frame, display: false)
 
         let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
         container.wantsLayer = true
@@ -68,7 +80,10 @@ final class CountdownOverlay {
         self.window = win
         self.label = lbl
 
-        win.orderFront(nil)
+        // `orderFrontRegardless` (vs `orderFront`) matters on non-main
+        // displays: when the LSUIElement app isn't frontmost, plain
+        // `orderFront` can silently no-op on other screens.
+        win.orderFrontRegardless()
         // First tick fires synchronously so the user sees the starting
         // number + hears the first beep immediately — waiting a full
         // second before "3" would make the feature feel sluggish.

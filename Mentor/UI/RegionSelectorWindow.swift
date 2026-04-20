@@ -1,43 +1,31 @@
 import AppKit
 
-/// Fullscreen drag-to-select region overlay. ESC, right-click, or 30s timeout cancels.
+/// Fullscreen drag-to-select region overlay, spawned on every connected
+/// display so the user can draw a region on any screen. ESC, right-click,
+/// or a 30s timeout cancels.
+///
+/// Callback returns both the `NSScreen` that received the click and the
+/// screen-local rect — the caller (`SourcePickerWindow`) needs both to
+/// build a `.region` source against the matching `SCDisplay`.
 @MainActor
 final class RegionSelectorWindow {
-    private var window: FocusableRegionPanel?
-    private var trackingView: RegionTrackingView?
-    private var screen: NSScreen?
-    private var onPicked: ((CGRect) -> Void)?
+    private var windows: [FocusableRegionPanel] = []
+    private var onPicked: ((NSScreen, CGRect) -> Void)?
     private var onCancel: (() -> Void)?
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var failsafeTimer: Timer?
 
-    func show(onPicked: @escaping (CGRect) -> Void, onCancel: @escaping () -> Void) {
-        guard let screen = NSScreen.main else { onCancel(); return }
-        self.screen = screen
+    func show(onPicked: @escaping (NSScreen, CGRect) -> Void, onCancel: @escaping () -> Void) {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { onCancel(); return }
         self.onPicked = onPicked
         self.onCancel = onCancel
 
-        let win = FocusableRegionPanel(
-            contentRect: screen.frame,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false,
-            screen: screen
-        )
-        win.isOpaque = false
-        win.backgroundColor = .clear
-        win.level = .screenSaver
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        win.acceptsMouseMovedEvents = true
-        win.hasShadow = false
-
-        let view = RegionTrackingView(frame: NSRect(origin: .zero, size: screen.frame.size))
-        view.onCommit = { [weak self] rect in self?.complete(rect: rect) }
-        view.onCancel = { [weak self] in self?.cancel() }
-        win.contentView = view
-        self.window = win
-        self.trackingView = view
+        for screen in screens {
+            let win = makeOverlay(on: screen)
+            windows.append(win)
+        }
 
         // Multiple ESC/cancel paths for safety:
         // 1. View's keyDown override (works because panel is key)
@@ -60,18 +48,60 @@ final class RegionSelectorWindow {
         }
 
         NSApp.activate(ignoringOtherApps: true)
-        win.makeKeyAndOrderFront(nil)
-        win.makeFirstResponder(view)
+        // Key-window goes on the screen with the mouse so the first
+        // mouseDown is routed directly without a focus-acquisition tap.
+        let mouseScreen = screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? screens[0]
+        for win in windows {
+            if win.screen == mouseScreen {
+                win.makeKeyAndOrderFront(nil)
+                if let view = win.contentView { win.makeFirstResponder(view) }
+            } else {
+                win.orderFrontRegardless()
+            }
+        }
     }
 
-    private func complete(rect: CGRect) {
+    private func makeOverlay(on screen: NSScreen) -> FocusableRegionPanel {
+        let win = FocusableRegionPanel(
+            contentRect: screen.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false,
+            screen: screen
+        )
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.level = .screenSaver
+        win.collectionBehavior = [
+            .canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary
+        ]
+        win.acceptsMouseMovedEvents = true
+        win.hasShadow = false
+        // AppKit treats init `contentRect:` as a suggestion and often
+        // relocates the window into the primary screen's space on
+        // multi-display rigs. Pin it back to `screen.frame` so each
+        // overlay lands on its own display.
+        win.setFrame(screen.frame, display: false)
+
+        let view = RegionTrackingView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        view.onCommit = { [weak self] rect in
+            self?.complete(screen: screen, rect: rect)
+        }
+        view.onCancel = { [weak self] in self?.cancel() }
+        win.contentView = view
+        return win
+    }
+
+    private func complete(screen: NSScreen, rect: CGRect) {
         // rect is in screen-local coords with origin at bottom-left.
-        // ScreenCaptureKit's SCStreamConfiguration.sourceRect uses the same convention
-        // (display points, bottom-left origin), so we can pass it through.
+        // ScreenCaptureKit's SCStreamConfiguration.sourceRect uses the
+        // same convention (display points, bottom-left origin), so we
+        // can pass it straight through.
         teardown()
-        onPicked?(rect)
+        let cb = onPicked
         onPicked = nil
         onCancel = nil
+        cb?(screen, rect)
     }
 
     private func cancel() {
@@ -89,9 +119,8 @@ final class RegionSelectorWindow {
         globalKeyMonitor = nil
         failsafeTimer?.invalidate()
         failsafeTimer = nil
-        window?.orderOut(nil)
-        window = nil
-        trackingView = nil
+        for w in windows { w.orderOut(nil) }
+        windows.removeAll()
     }
 }
 

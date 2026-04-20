@@ -58,14 +58,19 @@ enum EditorComposition {
             return bundle.micAudioURL
         }()
         let screenAsset = AVURLAsset(url: bundle.screenVideoURL)
-        let webcamAsset = AVURLAsset(url: bundle.webcamVideoURL)
         let micAsset    = AVURLAsset(url: effectiveMicURL)
         let systemAsset = AVURLAsset(url: bundle.systemAudioURL)
 
+        // Webcam sidecar is optional — recordings made while no camera
+        // is connected skip the webcam writer entirely, so the file may
+        // be missing. Building the asset on a non-existent path still
+        // "works" but `loadTracks` later throws an unhelpful error.
+        let webcamAsset: AVURLAsset? = FileManager.default.fileExists(atPath: bundle.webcamVideoURL.path)
+            ? AVURLAsset(url: bundle.webcamVideoURL)
+            : nil
+
         async let screenVideoTracks = screenAsset.loadTracks(withMediaType: .video)
         async let screenDuration    = screenAsset.load(.duration)
-        async let webcamVideoTracks = webcamAsset.loadTracks(withMediaType: .video)
-        async let webcamDuration    = webcamAsset.load(.duration)
 
         let screenTracks = try await screenVideoTracks
         guard let screenTrack = screenTracks.first else {
@@ -83,14 +88,17 @@ enum EditorComposition {
         ) else { throw Error.cannotAddTrack("screen") }
         try screenCompTrack.insertTimeRange(timeRange, of: screenTrack, at: .zero)
 
-        // Webcam video (optional)
+        // Webcam video (optional — sidecar file skipped entirely for
+        // screen-only recordings made when no camera was connected).
         var webcamTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
-        if let webcamTrack = try await webcamVideoTracks.first {
-            if let webcamCompTrack = composition.addMutableTrack(
-                withMediaType: .video,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            ) {
-                let wcDuration = try await webcamDuration
+        if let webcamAsset {
+            let webcamTracks = (try? await webcamAsset.loadTracks(withMediaType: .video)) ?? []
+            if let webcamTrack = webcamTracks.first,
+               let webcamCompTrack = composition.addMutableTrack(
+                   withMediaType: .video,
+                   preferredTrackID: kCMPersistentTrackID_Invalid
+               ) {
+                let wcDuration = (try? await webcamAsset.load(.duration)) ?? sDuration
                 let wcRange = CMTimeRange(
                     start: .zero,
                     duration: CMTimeMinimum(wcDuration, sDuration)

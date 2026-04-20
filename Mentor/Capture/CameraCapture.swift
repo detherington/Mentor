@@ -38,16 +38,26 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             break
         }
 
-        guard let videoDevice = Self.resolveVideoDevice() else {
+        // Video + audio are independently optional. If the Mac has a
+        // mic but no camera we still want the session up so the user
+        // can record a voiceover over a screen capture; conversely a
+        // connected camera with no mic is fine for silent demos. We
+        // only bail out if BOTH are missing — there's nothing to do.
+        let videoDevice = Self.resolveVideoDevice()
+        let audioDevice = Self.resolveAudioDevice()
+
+        guard videoDevice != nil || audioDevice != nil else {
             session.commitConfiguration()
             throw CaptureError.noCamera
         }
-        let videoInput = try AVCaptureDeviceInput(device: videoDevice)
-        if session.canAddInput(videoInput) { session.addInput(videoInput) }
 
-        Self.applyFrameRateLock(on: videoDevice)
+        if let videoDevice {
+            let videoInput = try AVCaptureDeviceInput(device: videoDevice)
+            if session.canAddInput(videoInput) { session.addInput(videoInput) }
+            Self.applyFrameRateLock(on: videoDevice)
+        }
 
-        if let audioDevice = Self.resolveAudioDevice() {
+        if let audioDevice {
             let audioInput = try AVCaptureDeviceInput(device: audioDevice)
             if session.canAddInput(audioInput) { session.addInput(audioInput) }
         }
@@ -64,6 +74,15 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
         session.commitConfiguration()
         isConfigured = true
+    }
+
+    /// `true` if the live session has a connected video input. Used to
+    /// decide whether to spin up the webcam sidecar writer — we still
+    /// want recording to work when the session is audio-only.
+    var hasVideoInput: Bool {
+        session.inputs
+            .compactMap { $0 as? AVCaptureDeviceInput }
+            .contains(where: { $0.device.hasMediaType(.video) })
     }
 
     /// Swap inputs live (no full session teardown). Called when the user

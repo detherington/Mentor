@@ -68,41 +68,22 @@ final class RecordingBorderWindow {
             .ignoresCycle,
             .fullScreenAuxiliary
         ]
+        // AppKit treats the init `contentRect:` as a suggestion and
+        // sometimes relocates it into the main screen's coordinate
+        // space — visible on multi-display rigs as the border only
+        // appearing on the primary display. Pinning the frame back to
+        // the global-coord rect we actually want fixes that (same
+        // fix applied to `CountdownOverlay`).
+        panel.setFrame(rect, display: false)
         return panel
     }
 
     // MARK: - Target screen resolution
 
     private func targetScreens(for source: CaptureSource) -> [NSScreen] {
-        switch source {
-        case .display(let display), .region(let display, _):
-            if let screen = Self.screen(for: display) {
-                return [screen]
-            }
-            return [NSScreen.main].compactMap { $0 }
-
-        case .window(let window):
-            let windowFrame = window.frame
-            let match = NSScreen.screens.max { a, b in
-                Self.intersectionArea(a.frame, windowFrame) <
-                Self.intersectionArea(b.frame, windowFrame)
-            }
-            return [match ?? NSScreen.main].compactMap { $0 }
+        if let screen = source.targetScreen() {
+            return [screen]
         }
-    }
-
-    private static func screen(for display: SCDisplay) -> NSScreen? {
-        NSScreen.screens.first { screen in
-            guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
-                return false
-            }
-            return n.uint32Value == display.displayID
-        }
-    }
-
-    private static func intersectionArea(_ a: CGRect, _ b: CGRect) -> CGFloat {
-        let r = a.intersection(b)
-        guard !r.isNull, !r.isEmpty else { return 0 }
-        return r.width * r.height
+        return [NSScreen.main].compactMap { $0 }
     }
 }

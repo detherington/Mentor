@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var teleprompterWindow: TeleprompterWindow?
 
     private var settingsObserver: NSObjectProtocol?
+    private var deviceConnectObserver: NSObjectProtocol?
+    private var deviceDisconnectObserver: NSObjectProtocol?
     private var lastKnownCameraDeviceID: String?
     private var lastKnownMicDeviceID: String?
 
@@ -302,6 +304,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.onSettingsChanged() }
         }
 
+        // Hot-plug: fire when a camera (or mic) appears. If the camera
+        // session failed to configure at launch because no device was
+        // connected, `isConfigured` is still false — retry then. If a
+        // session is already running, swap inputs so the user's saved
+        // device-ID wins if it just came online.
+        deviceConnectObserver = NotificationCenter.default.addObserver(
+            forName: .AVCaptureDeviceWasConnected,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.onCaptureDeviceConnected() }
+        }
+
+        // Hot-unplug: fall back to another camera if one is available,
+        // otherwise clear the preview so it doesn't sit on a stale
+        // freeze-frame of the last delivered buffer.
+        deviceDisconnectObserver = NotificationCenter.default.addObserver(
+            forName: .AVCaptureDeviceWasDisconnected,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.onCaptureDeviceDisconnected() }
+        }
+
         Task { @MainActor in
             await self.startCameraSessionWithPermissions()
             self.refreshWebcamPreview()
@@ -334,6 +360,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if let obs = settingsObserver { NotificationCenter.default.removeObserver(obs) }
+        if let obs = deviceConnectObserver { NotificationCenter.default.removeObserver(obs) }
+        if let obs = deviceDisconnectObserver { NotificationCenter.default.removeObserver(obs) }
     }
 
     // MARK: - Permissions / camera bring-up
@@ -346,9 +374,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try coordinator.startCameraSession()
             MentorDebug.log("APP: camera session started")
+        } catch CaptureError.noCamera {
+            // Absent camera at launch is a valid state — user may plug one in
+            // later, or only want screen recording. Don't show a modal error
+            // dialog; the hot-plug observer will retry when a device appears,
+            // and the actual record flow surfaces its own error if still
+            // missing at record time.
+            MentorDebug.log("APP: no camera at launch — will retry on device connect")
         } catch {
             MentorDebug.log("APP: camera setup failed: \(error.localizedDescription)")
             menuBar.flashError(message: "Camera setup failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Fires when any AVCaptureDevice is connected to the system. We get
+    /// this for every device type (camera, mic, external) so this runs
+    /// whether it's a webcam plug-in, Continuity Camera wake, or a USB
+    /// mic. Always safe to run even when nothing changed — `configure()`
+    /// and `reconfigureDevices()` are both idempotent.
+    private func onCaptureDeviceConnected() {
+        if !coordinator.cameraCapture.isConfigured {
+            MentorDebug.log("APP: device connected — retrying camera setup")
+            Task { @MainActor in
+                await self.startCameraSessionWithPermissions()
+                self.refreshWebcamPreview()
+            }
+        } else {
+            MentorDebug.log("APP: device connected — reconfiguring inputs")
+            coordinator.reconfigureDevices()
+            refreshWebcamPreview()
+        }
+    }
+
+    /// Camera (or mic) was unplugged / turned off. Re-resolve inputs so a
+    /// still-present fallback device can take over; if nothing's left,
+    /// wipe the preview so it doesn't sit on the last captured frame.
+    private func onCaptureDeviceDisconnected() {
+        guard coordinator.cameraCapture.isConfigured else { return }
+        MentorDebug.log("APP: device disconnected — reconfiguring inputs")
+        coordinator.reconfigureDevices()
+        if CameraCapture.resolveVideoDevice() == nil {
+            webcamPreview?.clear()
         }
     }
 
@@ -400,7 +466,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.startRecording(source: source) }
         }
         if Settings.shared.countdownEnabled {
-            countdown.show(seconds: Settings.shared.countdownSeconds, onComplete: proceed)
+            countdown.show(
+                seconds: Settings.shared.countdownSeconds,
+                on: source.targetScreen(),
+                onComplete: proceed
+            )
         } else {
             proceed()
         }

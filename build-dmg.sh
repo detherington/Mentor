@@ -27,7 +27,7 @@ WINDOW_WIDTH=660
 WINDOW_HEIGHT=440
 
 SIGN_IDENTITY="Developer ID Application: Darrell Etherington (8B29CDK832)"
-NOTARY_PROFILE="notary"
+NOTARY_PROFILE="Picsy"
 ENTITLEMENTS="Mentor/Resources/Mentor.entitlements"
 
 # Sparkle tooling — path into the SPM artifact cache. Xcode drops the

@@ -76,6 +76,16 @@ final class EditorViewModel {
     private(set) var lastExportURL: URL?
     private var exportTask: Task<Void, Never>?
 
+    /// `applyLayout()` bails out while a FinalRenderer pass is in flight
+    /// (the compositor's shared state is owned by that render). When
+    /// that happens during editor load — the auto-bake right after a
+    /// new recording is the common case — we'd silently never push the
+    /// just-computed keyframes to the compositor, and the preview
+    /// would only catch up when the user toggled something in the
+    /// inspector. This flag tracks whether a deferred re-apply has
+    /// already been scheduled so the watcher task doesn't pile up.
+    private var hasPendingDeferredApply = false
+
     // AVPlayer observers (torn down in deinit — marked nonisolated(unsafe)
     // so deinit can reference them without @MainActor hops).
     nonisolated(unsafe) private var timeObserverToken: Any?
@@ -1393,7 +1403,11 @@ final class EditorViewModel {
         // right after stopRecording. Without the second check the
         // editor could mid-flight flip something like
         // `webcamBackgroundStyle.mode` in the auto-rendered MP4.
-        guard !isExporting, !FinalRenderer.isRendering else { return }
+        guard !isExporting else { return }
+        if FinalRenderer.isRendering {
+            scheduleDeferredApplyLayout()
+            return
+        }
         LiveCompositor.state.update(
             position: webcamPosition,
             shape: webcamShape,
@@ -1420,6 +1434,26 @@ final class EditorViewModel {
         // frequency (user action, not drag).
         refreshCutBoundaryObservers()
         forceRedraw()
+    }
+
+    /// Poll `FinalRenderer.isRendering` until it clears, then push the
+    /// current editor state through `applyLayout()`. Only one watcher
+    /// runs at a time — subsequent calls while a watcher is in flight
+    /// are no-ops because the eventual re-apply reads whatever state
+    /// is current when it finally fires.
+    private func scheduleDeferredApplyLayout() {
+        guard !hasPendingDeferredApply else { return }
+        hasPendingDeferredApply = true
+        Task { [weak self] in
+            while FinalRenderer.isRendering {
+                try? await Task.sleep(nanoseconds: 100_000_000)  // 100 ms
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.hasPendingDeferredApply = false
+                self.applyLayout()
+            }
+        }
     }
 
     // MARK: - Talking-head keyframes

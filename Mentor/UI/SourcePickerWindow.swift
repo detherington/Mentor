@@ -6,6 +6,7 @@ import ScreenCaptureKit
 final class SourcePickerWindow {
     private var window: NSWindow?
     private var regionSelector: RegionSelectorWindow?  // strong ref so it lives until done
+    private var highlight = ScreenHighlightWindow()
     private var onPicked: ((CaptureSource) -> Void)?
     private var onCancel: (() -> Void)?
 
@@ -38,20 +39,32 @@ final class SourcePickerWindow {
         let view = SourcePickerView(
             displays: content.displays,
             windows: visibleWindows,
+            onHoverDisplay: { [weak self] display, hovering in
+                guard let self else { return }
+                if hovering, let screen = Self.screen(for: display) {
+                    self.highlight.show(on: screen)
+                } else {
+                    self.highlight.hide()
+                }
+            },
             onPick: { [weak self] source in
                 self?.complete(source)
             },
             onPickRegion: { [weak self] in
                 guard let self else { return }
                 self.window?.orderOut(nil)
-                let display = content.displays.first
                 let selector = RegionSelectorWindow()
                 self.regionSelector = selector  // retain so closures stay alive
                 selector.show(
-                    onPicked: { [weak self] rect in
+                    onPicked: { [weak self] screen, rect in
                         guard let self else { return }
                         self.regionSelector = nil
-                        guard let display else {
+                        // Match the NSScreen the user drew on to its
+                        // SCDisplay so the resulting `.region` source
+                        // captures from the correct display (+ so
+                        // countdown / border / scale lookups all
+                        // agree on the target).
+                        guard let display = Self.display(for: screen, in: content.displays) else {
                             self.cancel()
                             return
                         }
@@ -82,6 +95,7 @@ final class SourcePickerWindow {
     }
 
     private func complete(_ source: CaptureSource) {
+        highlight.hide()
         window?.orderOut(nil)
         window = nil
         let cb = onPicked
@@ -91,6 +105,7 @@ final class SourcePickerWindow {
     }
 
     private func cancel() {
+        highlight.hide()
         window?.orderOut(nil)
         window = nil
         let cb = onCancel
@@ -98,11 +113,26 @@ final class SourcePickerWindow {
         onCancel = nil
         cb?()
     }
+
+    private static func screen(for display: SCDisplay) -> NSScreen? {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        return NSScreen.screens.first { screen in
+            (screen.deviceDescription[key] as? NSNumber)?.uint32Value == display.displayID
+        }
+    }
+
+    private static func display(for screen: NSScreen, in displays: [SCDisplay]) -> SCDisplay? {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        guard let number = screen.deviceDescription[key] as? NSNumber else { return nil }
+        let displayID = number.uint32Value
+        return displays.first { $0.displayID == displayID }
+    }
 }
 
 private struct SourcePickerView: View {
     let displays: [SCDisplay]
     let windows: [SCWindow]
+    let onHoverDisplay: (SCDisplay, Bool) -> Void
     let onPick: (CaptureSource) -> Void
     let onPickRegion: () -> Void
     let onCancel: () -> Void
@@ -137,6 +167,9 @@ private struct SourcePickerView: View {
                                 subtitle: "\(display.width) × \(display.height)",
                                 systemImage: "display"
                             ) { onPick(.display(display)) }
+                            .onHover { hovering in
+                                onHoverDisplay(display, hovering)
+                            }
                         }
                     } else {
                         ForEach(windows, id: \.windowID) { window in
