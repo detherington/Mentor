@@ -76,15 +76,13 @@ final class EditorViewModel {
     private(set) var lastExportURL: URL?
     private var exportTask: Task<Void, Never>?
 
-    /// `applyLayout()` bails out while a FinalRenderer pass is in flight
-    /// (the compositor's shared state is owned by that render). When
-    /// that happens during editor load — the auto-bake right after a
-    /// new recording is the common case — we'd silently never push the
-    /// just-computed keyframes to the compositor, and the preview
-    /// would only catch up when the user toggled something in the
-    /// inspector. This flag tracks whether a deferred re-apply has
-    /// already been scheduled so the watcher task doesn't pile up.
-    private var hasPendingDeferredApply = false
+    /// When non-nil, the preview is in "click to place zoom focus"
+    /// mode — the EditorView overlays a hit-catcher that turns the
+    /// next click in the preview into a new `target` for this
+    /// keyframe. Observable so the UI can draw a banner + change the
+    /// row button's label while we wait.
+    var zoomTargetBeingPlaced: UUID?
+
 
     // AVPlayer observers (torn down in deinit — marked nonisolated(unsafe)
     // so deinit can reference them without @MainActor hops).
@@ -100,10 +98,28 @@ final class EditorViewModel {
     var webcamPosition: WebcamPosition {
         didSet {
             if oldValue != webcamPosition {
+                // Picking a preset corner supersedes any custom drag
+                // placement — otherwise the user would toggle the
+                // picker and see nothing happen.
+                webcamCustomOrigin = nil
                 applyLayout()
                 registerUndoableChange(\.webcamPosition, from: oldValue,
                                        actionName: "Change Webcam Position",
                                        coalesceKey: "webcamPosition")
+            }
+        }
+    }
+    /// Explicit drag-placed webcam origin (output-pixel, bottom-left).
+    /// Nil means use the preset corner + inset. The editor preview
+    /// exposes a drag gesture on the webcam rect that sets this; the
+    /// inspector picker clears it when the user switches to a preset.
+    var webcamCustomOrigin: CGPoint? {
+        didSet {
+            if oldValue != webcamCustomOrigin {
+                applyLayout()
+                registerUndoableChange(\.webcamCustomOrigin, from: oldValue,
+                                       actionName: "Move Webcam",
+                                       coalesceKey: "webcamCustomOrigin")
             }
         }
     }
@@ -569,6 +585,22 @@ final class EditorViewModel {
     var diameterMax: CGFloat { min(outputSize.width, outputSize.height) * 0.7 }
     var diameterMin: CGFloat { min(outputSize.width, outputSize.height) * 0.08 }
 
+    /// Current webcam bottom-left origin in output-pixel space,
+    /// before any talking-head interpolation. Used by the editor's
+    /// drag overlay to know where to put the hit-test rect.
+    var webcamBaseOrigin: CGPoint {
+        if let custom = webcamCustomOrigin { return custom }
+        let d = webcamDiameter
+        let i = webcamInset
+        switch webcamPosition {
+        case .bottomRight: return CGPoint(x: outputSize.width - d - i, y: i)
+        case .bottomLeft:  return CGPoint(x: i, y: i)
+        case .topRight:    return CGPoint(x: outputSize.width - d - i, y: outputSize.height - d - i)
+        case .topLeft:     return CGPoint(x: i, y: outputSize.height - d - i)
+        case .hidden:      return .zero
+        }
+    }
+
     init(project: RecordingProject) {
         self.project = project
         self.outputSize = CGSize(
@@ -578,6 +610,7 @@ final class EditorViewModel {
         self.backingScale = CGFloat(project.metadata.backingScale ?? 2.0)
 
         self.webcamPosition = WebcamPosition(rawValue: project.metadata.webcamLayout.position) ?? .bottomRight
+        self.webcamCustomOrigin = nil
         self.webcamShape = WebcamShape(rawValue: project.metadata.webcamLayout.shape) ?? .circle
         self.webcamDiameter = CGFloat(project.metadata.webcamLayout.diameterPoints) * CGFloat(project.metadata.backingScale ?? 2.0)
         self.webcamInset    = CGFloat(project.metadata.webcamLayout.insetPoints)    * CGFloat(project.metadata.backingScale ?? 2.0)
@@ -619,28 +652,10 @@ final class EditorViewModel {
 
         self.player = AVPlayer()
 
-        // Prime the compositor's shared state before AVFoundation instantiates it.
-        LiveCompositor.state.update(
-            position: webcamPosition,
-            shape: webcamShape,
-            diameter: webcamDiameter,
-            inset: webcamInset,
-            zoomKeyframes: [],
-            webcamTransitions: webcamTransitions,
-            startCard: startCard,
-            endCard: endCard,
-            trimMap: .entire(CMTimeRange(start: .zero, duration: .zero)),
-            cursorRipples: [],
-            cursorRippleStyle: .default,
-            talkingHeadKeyframes: [],
-            transcriptionLines: transcription?.lines ?? [],
-            captionStyle: captionStyle,
-            keystrokeChips: [],
-            keystrokeOverlayStyle: keystrokeOverlayStyle,
-            cursorTrack: .empty,
-            cursorHighlightStyle: cursorHighlightStyle,
-            webcamBackgroundStyle: webcamBackgroundStyle
-        )
+        // No global state to prime any more — each composition's own
+        // `State` instance is created in `EditorComposition.build`
+        // (see `compositionResult?.compositorState`). `applyLayout()`
+        // writes to it after the composition loads.
 
         attachPlayerObservers()
 
@@ -1396,23 +1411,19 @@ final class EditorViewModel {
     }
 
     private func applyLayout() {
-        // While ANY render is running, the compositor's shared state
-        // belongs to that render. `isExporting` covers our own
-        // editor-initiated exports; `FinalRenderer.isRendering` covers
-        // app-level renders too, notably the auto-bake that kicks off
-        // right after stopRecording. Without the second check the
-        // editor could mid-flight flip something like
-        // `webcamBackgroundStyle.mode` in the auto-rendered MP4.
+        // Editor-initiated exports still own the editor's own state
+        // (the export reads from it), so block mutations mid-export.
+        // An auto-bake running concurrently on a SEPARATE composition's
+        // state no longer blocks us — that was the old singleton
+        // design; each composition now owns its own `State`.
         guard !isExporting else { return }
-        if FinalRenderer.isRendering {
-            scheduleDeferredApplyLayout()
-            return
-        }
-        LiveCompositor.state.update(
+        guard let state = compositionResult?.compositorState else { return }
+        state.update(
             position: webcamPosition,
             shape: webcamShape,
             diameter: webcamDiameter,
             inset: webcamInset,
+            webcamCustomOrigin: webcamCustomOrigin,
             zoomKeyframes: zoomEnabled ? zoomKeyframes : [],
             webcamTransitions: webcamTransitions,
             startCard: startCard,
@@ -1434,26 +1445,6 @@ final class EditorViewModel {
         // frequency (user action, not drag).
         refreshCutBoundaryObservers()
         forceRedraw()
-    }
-
-    /// Poll `FinalRenderer.isRendering` until it clears, then push the
-    /// current editor state through `applyLayout()`. Only one watcher
-    /// runs at a time — subsequent calls while a watcher is in flight
-    /// are no-ops because the eventual re-apply reads whatever state
-    /// is current when it finally fires.
-    private func scheduleDeferredApplyLayout() {
-        guard !hasPendingDeferredApply else { return }
-        hasPendingDeferredApply = true
-        Task { [weak self] in
-            while FinalRenderer.isRendering {
-                try? await Task.sleep(nanoseconds: 100_000_000)  // 100 ms
-            }
-            await MainActor.run {
-                guard let self else { return }
-                self.hasPendingDeferredApply = false
-                self.applyLayout()
-            }
-        }
     }
 
     // MARK: - Talking-head keyframes
@@ -1838,6 +1829,39 @@ final class EditorViewModel {
         persistZoomLog()
         registerCoalescedZoomUndo(oldState: oldState, actionName: "Change Zoom Scale",
                                   coalesceKey: "zoomScale:\(id.uuidString)")
+    }
+
+    /// Enter "click to place focus" mode for this keyframe. The editor
+    /// preview grows a transparent hit-catcher; the next click inside
+    /// the preview rect is routed to `setZoomTarget`. Also seeks the
+    /// playhead to the keyframe's peak so the user sees the image at
+    /// the zoomed-in moment they're retargeting.
+    func beginPlacingZoomTarget(id: UUID) {
+        guard zoomKeyframes.contains(where: { $0.id == id }) else { return }
+        zoomTargetBeingPlaced = id
+        if let kf = zoomKeyframes.first(where: { $0.id == id }) {
+            seek(to: kf.peakStartTime)
+        }
+    }
+
+    /// Cancel focus-placement mode without updating the keyframe.
+    /// Wired to both the ESC key and an explicit "Cancel" in the banner.
+    func cancelPlacingZoomTarget() {
+        zoomTargetBeingPlaced = nil
+    }
+
+    /// Apply a user-picked focus point (already converted into
+    /// image-pixel coords, bottom-left origin — that's what
+    /// `ZoomKeyframe.target` uses and what the compositor consumes).
+    /// Registers undo so the user can revert cleanly.
+    func setZoomTarget(id: UUID, imagePixel: CGPoint) {
+        guard let idx = zoomKeyframes.firstIndex(where: { $0.id == id }) else { return }
+        let old = zoomKeyframes
+        zoomKeyframes[idx].target = imagePixel
+        zoomTargetBeingPlaced = nil
+        applyLayout()
+        persistZoomLog()
+        registerZoomKeyframesUndo(oldState: old, actionName: "Set Zoom Focus")
     }
 
     /// Wipe persisted keyframes and regenerate from the click log,

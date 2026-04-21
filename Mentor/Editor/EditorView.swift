@@ -35,6 +35,20 @@ struct EditorView: View {
                     AVPlayerViewRepresentable(player: vm.player)
                         .frame(minHeight: 320)
 
+                    // Click-to-place overlay for zoom focus points.
+                    // Only enters the hit path when a keyframe is
+                    // actively being retargeted — otherwise the
+                    // AVPlayerView controls work normally.
+                    if vm.zoomTargetBeingPlaced != nil {
+                        zoomFocusPlacementOverlay(vm: vm)
+                    } else if vm.webcamPosition != .hidden {
+                        // Drag-to-reposition the inset webcam. Scoped
+                        // to the webcam's on-screen rect so AVPlayerView
+                        // controls (play/pause bar, scrubber) still
+                        // receive clicks everywhere else.
+                        webcamDragOverlay(vm: vm)
+                    }
+
                     if vm.isLoading {
                         Color.black.opacity(0.35)
                         ProgressView("Loading composition…")
@@ -512,6 +526,7 @@ struct EditorView: View {
     @ViewBuilder
     private func zoomKeyframeRow(kf: ZoomKeyframe, vm: EditorViewModel) -> some View {
         let holdSeconds = CMTimeGetSeconds(CMTimeSubtract(kf.holdEndTime, CMTimeAdd(kf.startTime, kf.inDuration)))
+        let isPlacing = vm.zoomTargetBeingPlaced == kf.id
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Button {
@@ -525,6 +540,25 @@ struct EditorView: View {
                 .help("Jump to this zoom")
 
                 Spacer()
+
+                Button {
+                    if isPlacing {
+                        vm.cancelPlacingZoomTarget()
+                    } else {
+                        vm.beginPlacingZoomTarget(id: kf.id)
+                    }
+                } label: {
+                    Label(
+                        isPlacing ? "Cancel" : "Set Focus",
+                        systemImage: isPlacing ? "xmark.circle" : "scope"
+                    )
+                    .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(isPlacing
+                      ? "Cancel focus placement"
+                      : "Click a point on the preview to set this zoom's focus")
 
                 Button {
                     vm.removeZoomKeyframe(id: kf.id)
@@ -1480,6 +1514,187 @@ struct EditorView: View {
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         vm.startExport(to: url)
+    }
+
+    /// Full-size transparent overlay used to pick a zoom focus point.
+    /// AVPlayerView renders the video with `.resizeAspect`, so the
+    /// image occupies a letterboxed sub-rect of the view. We replicate
+    /// that aspect-fit math to translate a click into image-pixel
+    /// coordinates (bottom-left origin, matching `ZoomKeyframe.target`
+    /// and the compositor's convention).
+    @ViewBuilder
+    private func zoomFocusPlacementOverlay(vm: EditorViewModel) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.001)  // transparent but hit-testable
+                    .contentShape(Rectangle())
+                    .onTapGesture { location in
+                        let viewSize = geo.size
+                        let img = vm.outputSize
+                        guard let fit = Self.aspectFitRect(image: img, in: viewSize) else { return }
+                        guard fit.contains(location) else { return }  // click inside letterbox → ignore
+                        let localX = location.x - fit.minX
+                        let localY = location.y - fit.minY
+                        // SwiftUI is top-left origin; target uses
+                        // bottom-left origin (Core Image convention).
+                        let imgX = localX / fit.width * img.width
+                        let imgY = img.height - (localY / fit.height * img.height)
+                        if let id = vm.zoomTargetBeingPlaced {
+                            vm.setZoomTarget(id: id, imagePixel: CGPoint(x: imgX, y: imgY))
+                        }
+                    }
+
+                HStack(spacing: 10) {
+                    Image(systemName: "scope")
+                    Text("Click on the preview to set this zoom's focus point")
+                        .font(.callout.weight(.medium))
+                    Button("Cancel") { vm.cancelPlacingZoomTarget() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .keyboardShortcut(.cancelAction)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+                .padding(.top, 12)
+                .allowsHitTesting(true)
+            }
+        }
+    }
+
+    /// Webcam drag-to-reposition. The hit area covers the whole
+    /// preview (stationary) — otherwise, if we scoped it to the
+    /// webcam's current rect and updated that rect live, the hit area
+    /// would move under the cursor and SwiftUI's drag events would
+    /// read from a shifting reference frame. Visible as jitter.
+    ///
+    /// While dragging we render a dashed outline at the target — pure
+    /// SwiftUI, no compositor seeks. The actual `webcamCustomOrigin`
+    /// is committed once on release.
+    @ViewBuilder
+    private func webcamDragOverlay(vm: EditorViewModel) -> some View {
+        GeometryReader { geo in
+            if let fit = Self.aspectFitRect(image: vm.outputSize, in: geo.size) {
+                WebcamDragLayer(vm: vm, fit: fit)
+            }
+        }
+        .allowsHitTesting(true)
+    }
+
+    /// Stateful container: owns the drag-in-progress target so the
+    /// SwiftUI `@State` isn't reset every parent redraw.
+    private struct WebcamDragLayer: View {
+        let vm: EditorViewModel
+        let fit: CGRect
+
+        /// Live target origin in image-pixel space (bottom-left),
+        /// only populated while a drag is in progress. When non-nil,
+        /// the dashed outline renders at this position instead of the
+        /// committed one.
+        @State private var dragTarget: CGPoint?
+        /// Captured at drag start so we don't chase a moving base.
+        @State private var dragStart: CGPoint?
+
+        var body: some View {
+            ZStack(alignment: .topLeading) {
+                // Transparent catch-all — only processes drags that
+                // start inside the webcam's current display rect.
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .gesture(dragGesture)
+
+                // Dashed preview outline — only drawn during drag.
+                if let target = dragTarget {
+                    let outline = webcamDisplayRect(forImageOrigin: target)
+                    RoundedRectangle(cornerRadius: outlineCornerRadius(width: outline.width))
+                        .stroke(style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .foregroundStyle(.white)
+                        .frame(width: outline.width, height: outline.height)
+                        .position(x: outline.midX, y: outline.midY)
+                        .allowsHitTesting(false)
+                        .shadow(color: .black.opacity(0.4), radius: 2)
+                }
+            }
+            .help("Click and drag the webcam to reposition. Pick a corner in the inspector to reset.")
+        }
+
+        private var dragGesture: some Gesture {
+            DragGesture(minimumDistance: 1, coordinateSpace: .local)
+                .onChanged { value in
+                    let img = vm.outputSize
+                    let sx = fit.width / img.width
+                    let sy = fit.height / img.height
+                    // On first tick, qualify the gesture: only engage
+                    // if the starting click is over the webcam's
+                    // current display rect.
+                    if dragStart == nil {
+                        let current = webcamDisplayRect(forImageOrigin: vm.webcamBaseOrigin)
+                        guard current.contains(value.startLocation) else { return }
+                        dragStart = vm.webcamBaseOrigin
+                    }
+                    guard let start = dragStart else { return }
+                    let dx = value.translation.width / sx
+                    let dy = -value.translation.height / sy  // flip Y (image bottom-left)
+                    let d = vm.webcamDiameter
+                    let maxX = max(0, img.width - d)
+                    let maxY = max(0, img.height - d)
+                    dragTarget = CGPoint(
+                        x: min(max(0, start.x + dx), maxX),
+                        y: min(max(0, start.y + dy), maxY)
+                    )
+                }
+                .onEnded { _ in
+                    // Single compositor update = single seek, no jitter.
+                    if let target = dragTarget {
+                        vm.webcamCustomOrigin = target
+                    }
+                    dragTarget = nil
+                    dragStart = nil
+                }
+        }
+
+        /// Convert an image-pixel origin (bottom-left) into the
+        /// display-space rect that represents the webcam at that
+        /// origin, using the current aspect-fit mapping.
+        private func webcamDisplayRect(forImageOrigin origin: CGPoint) -> CGRect {
+            let img = vm.outputSize
+            let d = vm.webcamDiameter
+            let sx = fit.width / img.width
+            let sy = fit.height / img.height
+            let x = fit.minX + origin.x * sx
+            // Y flip: image origin is bottom-left, SwiftUI is top-left.
+            let y = fit.minY + (img.height - origin.y - d) * sy
+            return CGRect(x: x, y: y, width: d * sx, height: d * sy)
+        }
+
+        private func outlineCornerRadius(width: CGFloat) -> CGFloat {
+            switch vm.webcamShape {
+            case .circle:        return width / 2
+            case .roundedSquare: return width * 0.18
+            case .none:          return 0
+            }
+        }
+    }
+
+    /// Compute the aspect-fit display rect for an image of the given
+    /// pixel size inside a view of `viewSize`. Returns nil for
+    /// degenerate inputs.
+    private static func aspectFitRect(image: CGSize, in viewSize: CGSize) -> CGRect? {
+        guard image.width > 0, image.height > 0,
+              viewSize.width > 0, viewSize.height > 0 else { return nil }
+        let imgAspect = image.width / image.height
+        let viewAspect = viewSize.width / viewSize.height
+        if viewAspect > imgAspect {
+            // Pillarbox — image height = view height; width constrained.
+            let w = viewSize.height * imgAspect
+            let x = (viewSize.width - w) / 2
+            return CGRect(x: x, y: 0, width: w, height: viewSize.height)
+        } else {
+            // Letterbox — image width = view width; height constrained.
+            let h = viewSize.width / imgAspect
+            let y = (viewSize.height - h) / 2
+            return CGRect(x: 0, y: y, width: viewSize.width, height: h)
+        }
     }
 
     /// Direct NSViewRepresentable wrapper around `AVPlayerView` — sidesteps

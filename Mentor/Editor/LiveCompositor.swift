@@ -24,6 +24,11 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             let shape: WebcamShape
             let diameter: CGFloat       // output pixels
             let inset: CGFloat          // output pixels
+            /// If set, overrides the corner-preset placement with an
+            /// explicit bottom-left origin in output-pixel space.
+            /// Populated by drag-to-reposition in the editor; cleared
+            /// when the user picks a preset corner from the inspector.
+            let webcamCustomOrigin: CGPoint?
             let zoomKeyframes: [ZoomKeyframe]
             let webcamTransitions: WebcamTransitions
             let startCard: TitleCard
@@ -75,6 +80,7 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             shape: WebcamShape? = nil,
             diameter: CGFloat? = nil,
             inset: CGFloat? = nil,
+            webcamCustomOrigin: CGPoint?? = nil,
             zoomKeyframes: [ZoomKeyframe]? = nil,
             webcamTransitions: WebcamTransitions? = nil,
             startCard: TitleCard? = nil,
@@ -92,11 +98,21 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             webcamBackgroundStyle: WebcamBackgroundStyle? = nil
         ) {
             lock.lock(); defer { lock.unlock() }
+            // `CGPoint??` lets us distinguish "don't touch" (.none —
+            // caller omitted the arg) from "clear to nil"
+            // (.some(nil)). The viewmodel writes the full state on
+            // every call, so it always passes the .some branch.
+            let newCustomOrigin: CGPoint?
+            switch webcamCustomOrigin {
+            case .some(let v): newCustomOrigin = v
+            case .none:        newCustomOrigin = current.webcamCustomOrigin
+            }
             current = Snapshot(
                 position: position ?? current.position,
                 shape: shape ?? current.shape,
                 diameter: diameter ?? current.diameter,
                 inset: inset ?? current.inset,
+                webcamCustomOrigin: newCustomOrigin,
                 zoomKeyframes: zoomKeyframes ?? current.zoomKeyframes,
                 webcamTransitions: webcamTransitions ?? current.webcamTransitions,
                 startCard: startCard ?? current.startCard,
@@ -116,30 +132,40 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         }
     }
 
-    /// Singleton read by the compositor instance that AVFoundation creates.
-    static let state = State(
-        State.Snapshot(
-            position: .bottomRight,
-            shape: .circle,
-            diameter: 640,
-            inset: 96,
-            zoomKeyframes: [],
-            webcamTransitions: .default,
-            startCard: .defaultStart,
-            endCard: .defaultEnd,
-            trimMap: .entire(CMTimeRange(start: .zero, duration: .zero)),
-            cursorRipples: [],
-            cursorRippleStyle: .default,
-            talkingHeadKeyframes: [],
-            transcriptionLines: [],
-            captionStyle: .default,
-            keystrokeChips: [],
-            keystrokeOverlayStyle: .default,
-            cursorTrack: .empty,
-            cursorHighlightStyle: .default,
-            webcamBackgroundStyle: .default
+    /// Default state — used by `EditorComposition.build` / `stitched`
+    /// to seed each composition's own state instance. Previously a
+    /// global singleton, which meant the editor and the post-capture
+    /// auto-bake fought for the same mutable state: while the bake was
+    /// in flight, the editor's preview was stuck on whatever snapshot
+    /// the renderer set up, and inspector changes were suppressed to
+    /// avoid polluting the render. Per-instruction state lets them
+    /// coexist fully.
+    static func defaultState() -> State {
+        State(
+            State.Snapshot(
+                position: .bottomRight,
+                shape: .circle,
+                diameter: 640,
+                inset: 96,
+                webcamCustomOrigin: nil,
+                zoomKeyframes: [],
+                webcamTransitions: .default,
+                startCard: .defaultStart,
+                endCard: .defaultEnd,
+                trimMap: .entire(CMTimeRange(start: .zero, duration: .zero)),
+                cursorRipples: [],
+                cursorRippleStyle: .default,
+                talkingHeadKeyframes: [],
+                transcriptionLines: [],
+                captionStyle: .default,
+                keystrokeChips: [],
+                keystrokeOverlayStyle: .default,
+                cursorTrack: .empty,
+                cursorHighlightStyle: .default,
+                webcamBackgroundStyle: .default
+            )
         )
-    )
+    }
 
     // MARK: - AVVideoCompositing
 
@@ -247,7 +273,10 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
                 return
             }
 
-            let snapshot = Self.state.snapshot()
+            // Each composition owns its own State (editor preview vs.
+            // auto-bake); read whichever the instruction was built with
+            // so they don't fight over a shared singleton.
+            let snapshot = instruction.state.snapshot()
             let screenBuffer = request.sourceFrame(byTrackID: instruction.screenTrackID)
             let webcamBuffer = instruction.webcamTrackID != kCMPersistentTrackID_Invalid
                 ? request.sourceFrame(byTrackID: instruction.webcamTrackID)
@@ -748,12 +777,26 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         outputSize: CGSize
     ) -> (diameter: CGFloat, origin: CGPoint) {
         let normalDiameter = layout.diameter
-        let normalOrigin = webcamCornerOrigin(
-            position: layout.position,
-            diameter: normalDiameter,
-            inset: layout.inset,
-            outputSize: outputSize
-        )
+        // Custom origin (from editor drag-to-reposition) overrides the
+        // preset corner + inset math. Still clamp to the canvas so
+        // a stale offset from a prior session with a different output
+        // size can't push the webcam fully offscreen.
+        let normalOrigin: CGPoint = {
+            if let custom = layout.webcamCustomOrigin {
+                let maxX = max(0, outputSize.width - normalDiameter)
+                let maxY = max(0, outputSize.height - normalDiameter)
+                return CGPoint(
+                    x: min(max(0, custom.x), maxX),
+                    y: min(max(0, custom.y), maxY)
+                )
+            }
+            return webcamCornerOrigin(
+                position: layout.position,
+                diameter: normalDiameter,
+                inset: layout.inset,
+                outputSize: outputSize
+            )
+        }()
 
         guard let active = layout.talkingHeadKeyframes.first(where: { $0.contains(time) }) else {
             return (normalDiameter, normalOrigin)
@@ -879,6 +922,11 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
     /// Subclassing `AVVideoCompositionInstruction` directly caused AVFoundation
     /// to treat the instruction as invalid and skip rendering (compositor
     /// instantiated + render context set, but `startRequest` never called).
+    ///
+    /// Holds a strong reference to the composition's `State`, which the
+    /// compositor reads per frame. AVFoundation retains the instruction
+    /// for the lifetime of the video composition, so the state lives as
+    /// long as its composition does.
     final class Instruction: NSObject, AVVideoCompositionInstructionProtocol {
         let timeRange: CMTimeRange
         let enablePostProcessing: Bool = false
@@ -888,15 +936,18 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
 
         let screenTrackID: CMPersistentTrackID
         let webcamTrackID: CMPersistentTrackID
+        let state: State
 
         init(
             timeRange: CMTimeRange,
             screenTrackID: CMPersistentTrackID,
-            webcamTrackID: CMPersistentTrackID
+            webcamTrackID: CMPersistentTrackID,
+            state: State
         ) {
             self.timeRange = timeRange
             self.screenTrackID = screenTrackID
             self.webcamTrackID = webcamTrackID
+            self.state = state
             var ids: [NSValue] = [NSNumber(value: screenTrackID)]
             if webcamTrackID != kCMPersistentTrackID_Invalid {
                 ids.append(NSNumber(value: webcamTrackID))

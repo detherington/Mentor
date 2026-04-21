@@ -28,31 +28,18 @@ enum FinalRenderer {
         }
     }
 
-    /// Global "a render is in flight" flag. The compositor state
-    /// `LiveCompositor.state` is a singleton; whichever code path
-    /// writes to it last wins. That's fine when there's only one
-    /// consumer, but `renderUsingCaptureLayout` (auto-baked MP4 right
-    /// after stopping a recording) and any open editor's
-    /// `applyLayout()` can race if the user opens an editor for a
-    /// *different* recording while the auto-render of the new one is
-    /// still running — editor writes pollute the render's state and
-    /// settings like `webcamBackgroundStyle` flip mid-video.
-    ///
-    /// Callers (here + `EditorViewModel.applyLayout`) check this flag
-    /// and skip pushing updates while a render is active. One-render-
-    /// at-a-time behaviour is also enforced by `renderLock` below.
+    /// Serialise concurrent renders — each render now owns its own
+    /// compositor `State` (no shared singleton any more), so this
+    /// lock is purely about not piling up simultaneous HW H.264
+    /// encoders. The auto-bake runs right after `stopRecording`, and
+    /// the editor's Export button runs on user action; back-to-back
+    /// use is common, but overlapping use would mean two full-rate
+    /// encoders on the media engine at once.
     private static let renderLock = NSLock()
     nonisolated(unsafe) private static var _isRendering: Bool = false
-    static var isRendering: Bool {
-        renderLock.lock(); defer { renderLock.unlock() }
-        return _isRendering
-    }
 
-    /// Run `body` inside a guarded "render is in flight" window.
-    /// Serialises multiple renders and surfaces `isRendering == true`
-    /// to other code paths (specifically `EditorViewModel`) so they
-    /// skip compositor-state writes while we've got the singleton
-    /// committed to our layout.
+    /// Run `body` inside a guarded "render is in flight" window so
+    /// only one encoder pass is live at a time.
     private static func withRenderLock<T>(_ body: () async throws -> T) async rethrows -> T {
         // Busy-wait with a short sleep rather than a continuation
         // queue — we don't expect contention to be common (auto-
@@ -208,11 +195,9 @@ enum FinalRenderer {
         outputURL: URL,
         progress: ((Float) -> Void)? = nil
     ) async throws -> URL {
-        // Serialise all renders through the shared lock — while we're
-        // inside this block `isRendering` is true, which causes any
-        // open editor's `applyLayout()` to skip writing to
-        // `LiveCompositor.state`. Prevents the "auto-render picks up
-        // whatever the editor happened to type last" bug.
+        // Serialise all renders through the shared lock so we don't
+        // spin up two real-time H.264 encoders at once (auto-bake +
+        // editor export, or two exports in quick succession).
         try await withRenderLock {
             try await runRender(
                 bundle: bundle,
@@ -226,8 +211,10 @@ enum FinalRenderer {
     }
 
     /// Actual render body — extracted from `render(...)` so the
-    /// render-lock wrapper above stays short + obvious. Everything in
-    /// here assumes exclusive access to `LiveCompositor.state`.
+    /// render-lock wrapper above stays short + obvious. Each call
+    /// owns its own `EditorComposition.Result` (and therefore its own
+    /// `LiveCompositor.State`), so it can run concurrently with the
+    /// editor's live preview on the same bundle.
     private static func runRender(
         bundle: RecordingBundle,
         metadata: RecordingMetadata,
@@ -236,9 +223,10 @@ enum FinalRenderer {
         outputURL: URL,
         progress: ((Float) -> Void)?
     ) async throws -> URL {
-        // Prime the compositor's shared state. NOTE: the compositor reads
-        // this state per frame, so callers must avoid racing mutations
-        // while a render is in flight.
+        // Build this render's own composition (and thus its own
+        // `LiveCompositor.State`). Any concurrent editor session on
+        // the same bundle has a separate Result + separate state —
+        // their `applyLayout` writes land in a different place.
         let sourceComp = try await EditorComposition.build(
             bundle: bundle,
             metadata: metadata,
@@ -285,7 +273,10 @@ enum FinalRenderer {
             renderCursorTrack = effectiveMap.remap(cursorTrack: layout.cursorTrack)
         }
 
-        LiveCompositor.state.update(
+        // Write to THIS render's own composition state — independent
+        // of any editor session running concurrently on the same
+        // bundle.
+        composition.compositorState.update(
             position: layout.position,
             shape: layout.shape,
             diameter: layout.diameterPixels,

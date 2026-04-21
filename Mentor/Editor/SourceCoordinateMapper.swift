@@ -21,11 +21,23 @@ enum SourceCoordinateMapper {
     /// Translate `p` (global Cocoa screen point) into image-pixel
     /// coordinates for `metadata`'s captured source. Returns nil for
     /// clicks outside the captured area.
+    ///
+    /// Scale note: we derive the points→pixels ratio from
+    /// `screenPixelSize / natural-size-in-points`, NOT from
+    /// `backingScale`. Apple Silicon's H.264 encoder caps near 4K on
+    /// the long side, so captures from larger displays (5K / 6K) are
+    /// downscaled at record time. Multiplying by the native
+    /// `backingScale` in those cases puts clicks well past their true
+    /// image coordinates (visible as ripples offset down-right of the
+    /// actual cursor).
     static func imagePixel(
         forScreenPoint p: CGPoint,
         metadata: RecordingMetadata
     ) -> CGPoint? {
-        let scale = CGFloat(metadata.backingScale ?? 2.0)
+        let imageSize = CGSize(
+            width: metadata.screenPixelSize.width,
+            height: metadata.screenPixelSize.height
+        )
 
         switch metadata.source.kind {
         case "display":
@@ -36,7 +48,9 @@ enum SourceCoordinateMapper {
             let frame = screen.frame
             guard frame.contains(p) else { return nil }
             let local = CGPoint(x: p.x - frame.minX, y: p.y - frame.minY)
-            return CGPoint(x: local.x * scale, y: local.y * scale)
+            let sx = imageSize.width / frame.width
+            let sy = imageSize.height / frame.height
+            return CGPoint(x: local.x * sx, y: local.y * sy)
 
         case "window":
             guard let wx = metadata.source.windowFrameX,
@@ -61,7 +75,9 @@ enum SourceCoordinateMapper {
                 x: p.x - windowFrameCocoa.minX,
                 y: p.y - windowFrameCocoa.minY
             )
-            return CGPoint(x: local.x * scale, y: local.y * scale)
+            let sx = imageSize.width / ww
+            let sy = imageSize.height / wh
+            return CGPoint(x: local.x * sx, y: local.y * sy)
 
         case "region":
             guard let displayID = metadata.source.displayID,
@@ -92,7 +108,9 @@ enum SourceCoordinateMapper {
                 x: localCocoa.x - regionFrame.minX,
                 y: localCocoa.y - regionFrame.minY
             )
-            return CGPoint(x: local.x * scale, y: local.y * scale)
+            let sx = imageSize.width / rw
+            let sy = imageSize.height / rh
+            return CGPoint(x: local.x * sx, y: local.y * sy)
 
         default:
             return nil

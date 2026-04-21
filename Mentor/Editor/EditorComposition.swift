@@ -18,6 +18,10 @@ enum EditorComposition {
         let micTrackID: CMPersistentTrackID
         let systemTrackID: CMPersistentTrackID
         let soundboardTrackID: CMPersistentTrackID
+        /// Per-composition compositor state. Editor and auto-bake each
+        /// build their own composition (and thus their own state), so
+        /// one doesn't clobber the other's layout settings.
+        let compositorState: LiveCompositor.State
     }
 
     enum Error: Swift.Error, LocalizedError {
@@ -167,10 +171,12 @@ enum EditorComposition {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
         videoComposition.customVideoCompositorClass = LiveCompositor.self
 
+        let compositorState = LiveCompositor.defaultState()
         let instruction = LiveCompositor.Instruction(
             timeRange: timeRange,
             screenTrackID: screenCompTrack.trackID,
-            webcamTrackID: webcamTrackID
+            webcamTrackID: webcamTrackID,
+            state: compositorState
         )
         videoComposition.instructions = [instruction]
 
@@ -184,7 +190,8 @@ enum EditorComposition {
             webcamTrackID: webcamTrackID,
             micTrackID: micID,
             systemTrackID: systemID,
-            soundboardTrackID: soundboardID
+            soundboardTrackID: soundboardID,
+            compositorState: compositorState
         )
     }
 
@@ -274,7 +281,12 @@ enum EditorComposition {
             LiveCompositor.Instruction(
                 timeRange: CMTimeRange(start: .zero, duration: stitchedDuration),
                 screenTrackID: screenID,
-                webcamTrackID: webcamID
+                webcamTrackID: webcamID,
+                // Stitched comp is rendered by the same caller that
+                // owns `source`, so they share the same State instance.
+                // The single writer (editor export or renderer) is
+                // logically one session.
+                state: source.compositorState
             )
         ]
 
@@ -288,7 +300,8 @@ enum EditorComposition {
             webcamTrackID: webcamID,
             micTrackID: micID,
             systemTrackID: systemID,
-            soundboardTrackID: soundboardID
+            soundboardTrackID: soundboardID,
+            compositorState: source.compositorState
         )
     }
 }
