@@ -1562,15 +1562,17 @@ struct EditorView: View {
         }
     }
 
-    /// Webcam drag-to-reposition. The hit area covers the whole
-    /// preview (stationary) — otherwise, if we scoped it to the
-    /// webcam's current rect and updated that rect live, the hit area
-    /// would move under the cursor and SwiftUI's drag events would
-    /// read from a shifting reference frame. Visible as jitter.
+    /// Webcam drag-to-reposition. The hit-testable catcher is scoped
+    /// tightly to the webcam's current display rect so clicks
+    /// elsewhere (AVPlayerView's play/pause/timeline controls) still
+    /// route through. The rect is safe to pin to the "committed"
+    /// position because we don't update `vm.webcamCustomOrigin` until
+    /// the drag ends — the webcam doesn't visually move mid-drag, so
+    /// neither does the hit area.
     ///
-    /// While dragging we render a dashed outline at the target — pure
-    /// SwiftUI, no compositor seeks. The actual `webcamCustomOrigin`
-    /// is committed once on release.
+    /// The dashed-outline preview that follows the cursor lives in a
+    /// separate, full-preview container with `allowsHitTesting(false)`
+    /// so it never steals clicks.
     @ViewBuilder
     private func webcamDragOverlay(vm: EditorViewModel) -> some View {
         GeometryReader { geo in
@@ -1578,7 +1580,6 @@ struct EditorView: View {
                 WebcamDragLayer(vm: vm, fit: fit)
             }
         }
-        .allowsHitTesting(true)
     }
 
     /// Stateful container: owns the drag-in-progress target so the
@@ -1596,14 +1597,22 @@ struct EditorView: View {
         @State private var dragStart: CGPoint?
 
         var body: some View {
+            let baseRect = webcamDisplayRect(forImageOrigin: vm.webcamBaseOrigin)
+
             ZStack(alignment: .topLeading) {
-                // Transparent catch-all — only processes drags that
-                // start inside the webcam's current display rect.
+                // Hit-testable catcher, tightly scoped to the webcam's
+                // current on-screen rect. Everywhere else in the
+                // preview falls through to AVPlayerView's controls.
                 Color.black.opacity(0.001)
                     .contentShape(Rectangle())
+                    .frame(width: baseRect.width, height: baseRect.height)
+                    .position(x: baseRect.midX, y: baseRect.midY)
                     .gesture(dragGesture)
+                    .help("Drag to reposition. Pick a corner in the inspector to reset.")
 
                 // Dashed preview outline — only drawn during drag.
+                // Lives in a full-preview container with hit-testing
+                // disabled so it never consumes clicks.
                 if let target = dragTarget {
                     let outline = webcamDisplayRect(forImageOrigin: target)
                     RoundedRectangle(cornerRadius: outlineCornerRadius(width: outline.width))
@@ -1611,11 +1620,15 @@ struct EditorView: View {
                         .foregroundStyle(.white)
                         .frame(width: outline.width, height: outline.height)
                         .position(x: outline.midX, y: outline.midY)
-                        .allowsHitTesting(false)
                         .shadow(color: .black.opacity(0.4), radius: 2)
                 }
             }
-            .help("Click and drag the webcam to reposition. Pick a corner in the inspector to reset.")
+            .allowsHitTesting(true)
+            // Outline overlay + shadow need the full preview as their
+            // reference frame; apply hit-testing off there in isolation.
+            .overlay(alignment: .topLeading) {
+                EmptyView().allowsHitTesting(false)
+            }
         }
 
         private var dragGesture: some Gesture {
@@ -1624,12 +1637,7 @@ struct EditorView: View {
                     let img = vm.outputSize
                     let sx = fit.width / img.width
                     let sy = fit.height / img.height
-                    // On first tick, qualify the gesture: only engage
-                    // if the starting click is over the webcam's
-                    // current display rect.
                     if dragStart == nil {
-                        let current = webcamDisplayRect(forImageOrigin: vm.webcamBaseOrigin)
-                        guard current.contains(value.startLocation) else { return }
                         dragStart = vm.webcamBaseOrigin
                     }
                     guard let start = dragStart else { return }

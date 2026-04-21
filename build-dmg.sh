@@ -39,13 +39,26 @@ SPARKLE_BIN="$HOME/Library/Developer/Xcode/DerivedData/Mentor-enurpttqtmadbpguie
 # (bundle version, Sparkle feed URL, etc). If we skip this step and
 # project.yml has been edited since the last xcodegen run, the build
 # will silently use a stale Info.plist — which nuked v1.0.0's first
-# build with a bad SUFeedURL + placeholder SUPublicEDKey.
+# build with a bad SUFeedURL + placeholder SUPublicEDKey, and stamped
+# v1.0.10 with 1.0.8 on its first pass.
+#
+# Resolution order:
+#   1. Repo-local `.local/bin/xcodegen` (built by `scripts/bootstrap.sh`)
+#   2. Whatever's on `$PATH` (e.g. `brew install xcodegen` at
+#      `/opt/homebrew/bin/xcodegen`)
+XCODEGEN_BIN=""
 if [ -x ".local/bin/xcodegen" ]; then
-    echo "=== Regenerating Xcode project from project.yml ==="
-    .local/bin/xcodegen generate 2>&1 | tail -3
+    XCODEGEN_BIN=".local/bin/xcodegen"
+elif command -v xcodegen >/dev/null 2>&1; then
+    XCODEGEN_BIN="$(command -v xcodegen)"
+fi
+
+if [ -n "$XCODEGEN_BIN" ]; then
+    echo "=== Regenerating Xcode project from project.yml (${XCODEGEN_BIN}) ==="
+    "$XCODEGEN_BIN" generate 2>&1 | tail -3
 else
-    echo "WARN: .local/bin/xcodegen not found — Info.plist may be stale."
-    echo "       Run scripts/bootstrap.sh once to build the XcodeGen binary."
+    echo "WARN: xcodegen not found in .local/bin or \$PATH — Info.plist may be stale."
+    echo "       Run scripts/bootstrap.sh once, or install via: brew install xcodegen"
 fi
 
 # ---- Preflight: sanity-check Info.plist for unsubstituted placeholders.
