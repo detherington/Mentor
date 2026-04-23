@@ -54,8 +54,8 @@ targets:
         CFBundleDisplayName: Mentor
         # Bumped on every release. `build-dmg.sh` reads these from
         # Info.plist and threads them through the appcast entry.
-        CFBundleShortVersionString: "1.1.0"
-        CFBundleVersion: "13"
+        CFBundleShortVersionString: "1.1.1"
+        CFBundleVersion: "14"
         LSUIElement: true
         NSCameraUsageDescription: Mentor records your webcam to overlay it on screen recordings.
         NSMicrophoneUsageDescription: Mentor records your microphone for narration.

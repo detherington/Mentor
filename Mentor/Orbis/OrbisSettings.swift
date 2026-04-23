@@ -39,12 +39,38 @@ final class OrbisSettings {
     private var defaultHost: String { Self.defaultHost }
 
     var host: String {
-        get { defaults.string(forKey: Key.host) ?? defaultHost }
+        get {
+            // Always sanitize on read too — tolerate legacy values
+            // stored before the sanitizer existed, or a user who
+            // edited UserDefaults by hand.
+            Self.sanitizeHost(defaults.string(forKey: Key.host) ?? defaultHost)
+        }
         set {
-            let cleaned = newValue.trimmingCharacters(in: .whitespaces)
+            let cleaned = Self.sanitizeHost(newValue)
             defaults.set(cleaned.isEmpty ? defaultHost : cleaned, forKey: Key.host)
             post()
         }
+    }
+
+    /// Strip scheme, trailing slashes, whitespace so we can always
+    /// safely prefix `https://` and append `/api/...`. A user pasting
+    /// `https://sbsorbis.com/` or `sbsorbis.com ` or
+    /// `http://sbsorbis.com/api/` all end up as `sbsorbis.com`.
+    static func sanitizeHost(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["https://", "http://"] {
+            if s.lowercased().hasPrefix(prefix) {
+                s = String(s.dropFirst(prefix.count))
+                break
+            }
+        }
+        // Drop anything after the host (path / query / trailing slash)
+        // — if a user pastes `sbsorbis.com/api/auth/user` we still want
+        // just the hostname.
+        if let slash = s.firstIndex(of: "/") {
+            s = String(s[..<slash])
+        }
+        return s
     }
 
     /// Display name returned by `/api/auth/me` after a successful

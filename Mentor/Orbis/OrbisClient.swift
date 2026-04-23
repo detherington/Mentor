@@ -38,8 +38,12 @@ final class OrbisClient: NSObject, @unchecked Sendable {
 
     // MARK: - Endpoints
 
+    /// Validate + fetch the currently-authenticated user. Orbis's
+    /// route is `/api/auth/user` (the original spec said `/me`, which
+    /// returns the React 404 page and decodes as garbage — if you see
+    /// `decodingError`, double-check this URL first).
     func me() async throws -> OrbisUser {
-        let url = try endpoint("/api/auth/me")
+        let url = try endpoint("/api/auth/user")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         applyAuth(&req)

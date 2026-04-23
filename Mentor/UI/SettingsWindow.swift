@@ -53,6 +53,8 @@ private struct SettingsView: View {
     @State private var orbisUserName: String?       = OrbisSettings.shared.connectedUserName
     @State private var orbisTestResult: String?     = nil
     @State private var orbisTesting: Bool           = false
+    @State private var orbisPasteToken: String      = ""
+    @State private var orbisValidating: Bool        = false
 
     var body: some View {
         Form {
@@ -174,8 +176,8 @@ private struct SettingsView: View {
                     Spacer()
                 }
 
-                HStack {
-                    if orbisConnected {
+                if orbisConnected {
+                    HStack {
                         Button("Disconnect", role: .destructive) {
                             OrbisSettings.shared.host = orbisHost
                             disconnectOrbis()
@@ -184,13 +186,31 @@ private struct SettingsView: View {
                             testOrbisConnection()
                         }
                         .disabled(orbisTesting)
-                    } else {
-                        Button("Connect to Orbis") {
+                    }
+                } else {
+                    // Two paths to authenticate:
+                    //   (1) Paste a PAT directly — works today.
+                    //   (2) Browser callback — requires Orbis to have
+                    //       the /settings/api-tokens page shipped. Until
+                    //       that exists, clicking it just opens a 404.
+                    SecureField("Paste Orbis token (starts with orb_…)", text: $orbisPasteToken)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button(orbisValidating ? "Validating…" : "Save & validate") {
+                            validatePastedToken()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(orbisValidating ||
+                                  orbisPasteToken.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Spacer()
+                        Button("Open Orbis in browser") {
                             OrbisSettings.shared.host = orbisHost
                             connectOrbis()
                         }
+                        .help("Opens the Orbis PAT page. The page may not be available yet — fall back to pasting the token above.")
                     }
                 }
+
                 if let result = orbisTestResult {
                     Text(result)
                         .font(.caption)
@@ -241,7 +261,43 @@ private struct SettingsView: View {
         OrbisKeychain.deleteToken()
         OrbisSettings.shared.connectedUserName = nil
         orbisTestResult = nil
+        orbisPasteToken = ""
         refreshOrbisState()
+    }
+
+    /// Save a user-pasted PAT to the keychain and validate it against
+    /// `/api/auth/user`. Success → we're connected; failure → wipe the
+    /// token and surface the error so the user can correct it without
+    /// leaving a broken credential behind.
+    private func validatePastedToken() {
+        OrbisSettings.shared.host = orbisHost
+        let token = orbisPasteToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        orbisValidating = true
+        orbisTestResult = nil
+        Task { @MainActor in
+            defer {
+                orbisValidating = false
+                refreshOrbisState()
+            }
+            do {
+                try OrbisKeychain.saveToken(token)
+            } catch {
+                orbisTestResult = "Couldn't save token to keychain: \(error.localizedDescription)"
+                return
+            }
+            let client = OrbisClient(host: OrbisSettings.shared.host, token: token)
+            do {
+                let me = try await client.me()
+                OrbisSettings.shared.connectedUserName = me.name ?? me.email ?? "Connected"
+                orbisPasteToken = ""
+                orbisTestResult = "Connected as \(OrbisSettings.shared.connectedUserName ?? "?")."
+            } catch {
+                OrbisKeychain.deleteToken()
+                OrbisSettings.shared.connectedUserName = nil
+                orbisTestResult = error.localizedDescription
+            }
+        }
     }
 
     /// Hit `GET /api/auth/me`. Success → update the cached user name.
