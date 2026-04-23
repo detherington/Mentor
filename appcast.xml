@@ -12,6 +12,18 @@
              its output prints. -->
 
         <item>
+            <title>Version 1.1.0</title>
+            <pubDate>Thu, 23 Apr 2026 15:18:25 +0000</pubDate>
+            <sparkle:version>13</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/detherington/Mentor/releases/download/v1.1.0/Mentor.dmg"
+                type="application/octet-stream"
+                sparkle:edSignature="sL6quYqIT5J0mpYOxb6vb4OGr/ZTxyyB/9sd7we/A5QZRdfB0SQ6MiTd8bYIsiC3rJp1t79ybXfsdNBI86GaBA==" length="2765699" />
+        </item>
+
+        <item>
             <title>Version 1.0.11</title>
             <pubDate>Tue, 21 Apr 2026 02:08:21 +0000</pubDate>
             <sparkle:version>12</sparkle:version>
