@@ -1979,16 +1979,12 @@ final class EditorViewModel {
         project.bundleURL.deletingLastPathComponent()
     }
 
-    /// Kick off an async export with the editor's current inspector values
-    /// and trim range. Does nothing if an export is already in flight.
-    func startExport(to outputURL: URL) {
-        guard !isExporting else { return }
-
-        // Pause preview — the player item + the renderer both read the
-        // same raw source files; pausing avoids resource contention.
-        player.pause()
-
-        let layout = FinalRenderer.ExportLayout(
+    /// Build the `ExportLayout` that reflects the editor's current
+    /// inspector values. Shared between the local-file export path
+    /// and third-party destinations (Orbis) so both encode exactly
+    /// what the user sees in the preview.
+    func currentExportLayout() -> FinalRenderer.ExportLayout {
+        FinalRenderer.ExportLayout(
             position: webcamPosition,
             shape: webcamShape,
             diameterPixels: webcamDiameter,
@@ -2012,9 +2008,28 @@ final class EditorViewModel {
             micOverrideURL: effectiveMicOverrideURL(),
             writeSRTSidecar: exportSRTSidecar
         )
+    }
+
+    /// Current editor trim range as a `TrimMap`, returning nil when
+    /// the trim is trivial (no-op). Matches what `startExport` feeds
+    /// to `FinalRenderer.render`.
+    func currentExportTrimMap() -> TrimMap? {
+        trimMap.isTrivial(fullDuration: duration) ? nil : trimMap
+    }
+
+    /// Kick off an async export with the editor's current inspector values
+    /// and trim range. Does nothing if an export is already in flight.
+    func startExport(to outputURL: URL) {
+        guard !isExporting else { return }
+
+        // Pause preview — the player item + the renderer both read the
+        // same raw source files; pausing avoids resource contention.
+        player.pause()
+
+        let layout = currentExportLayout()
         let bundle = project.bundle
         let metadata = project.metadata
-        let exportMap: TrimMap? = trimMap.isTrivial(fullDuration: duration) ? nil : trimMap
+        let exportMap: TrimMap? = currentExportTrimMap()
 
         isExporting = true
         exportProgress = 0

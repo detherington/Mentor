@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 /// editable webcam overlay inspector, real-time preview.
 struct EditorView: View {
     @State private var viewModel: EditorViewModel
+    @State private var showOrbisSheet = false
 
     init(project: RecordingProject) {
         _viewModel = State(wrappedValue: EditorViewModel(project: project))
@@ -22,6 +23,11 @@ struct EditorView: View {
                 set: { if !$0 { vm.exportError = nil } }
             )) {
                 ExportSheet(viewModel: vm)
+            }
+            .sheet(isPresented: $showOrbisSheet) {
+                OrbisExportSheet(vm: vm) {
+                    showOrbisSheet = false
+                }
             }
     }
 
@@ -337,6 +343,21 @@ struct EditorView: View {
                 }
                 .controlSize(.large)
                 .disabled(vm.isExporting || vm.isLoading || vm.loadError != nil)
+
+                // Orbis export — only meaningful when a token is
+                // stored. Before connecting, surface a disabled
+                // button + a shortcut to the Settings pane so users
+                // know the path exists.
+                if OrbisSettings.shared.isConnected {
+                    Button {
+                        showOrbisSheet = true
+                    } label: {
+                        Label("Export to Orbis…", systemImage: "arrow.up.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .disabled(vm.isExporting || vm.isLoading || vm.loadError != nil)
+                }
 
                 Text("Renders a new MP4 with the webcam layout above baked in. Original bundle is untouched.")
                     .font(.caption2)

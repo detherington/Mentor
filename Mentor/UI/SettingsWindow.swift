@@ -44,6 +44,16 @@ private struct SettingsView: View {
     @State private var availableCameras: [AVCaptureDevice] = []
     @State private var availableMics: [AVCaptureDevice]    = []
 
+    // Orbis state — mirror `OrbisSettings.shared` + Keychain into
+    // @State so SwiftUI renders reactively. Refreshed on
+    // `OrbisSettings.didChange` and after Connect / Disconnect /
+    // Test Connection actions.
+    @State private var orbisHost: String            = OrbisSettings.shared.host
+    @State private var orbisConnected: Bool         = OrbisSettings.shared.isConnected
+    @State private var orbisUserName: String?       = OrbisSettings.shared.connectedUserName
+    @State private var orbisTestResult: String?     = nil
+    @State private var orbisTesting: Bool           = false
+
     var body: some View {
         Form {
             Section("Devices") {
@@ -146,14 +156,119 @@ private struct SettingsView: View {
                     }
                 }
             }
+
+            Section("Orbis") {
+                TextField("Host", text: $orbisHost)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { OrbisSettings.shared.host = orbisHost }
+
+                HStack {
+                    Circle()
+                        .fill(orbisConnected ? Color.green : Color.secondary)
+                        .frame(width: 8, height: 8)
+                    if orbisConnected, let name = orbisUserName {
+                        Text("Connected as \(name)").font(.caption)
+                    } else {
+                        Text("Not connected").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+
+                HStack {
+                    if orbisConnected {
+                        Button("Disconnect", role: .destructive) {
+                            OrbisSettings.shared.host = orbisHost
+                            disconnectOrbis()
+                        }
+                        Button(orbisTesting ? "Testing…" : "Test connection") {
+                            testOrbisConnection()
+                        }
+                        .disabled(orbisTesting)
+                    } else {
+                        Button("Connect to Orbis") {
+                            OrbisSettings.shared.host = orbisHost
+                            connectOrbis()
+                        }
+                    }
+                }
+                if let result = orbisTestResult {
+                    Text(result)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Orbis stores your recordings in a Cloudflare-backed video library. After you connect, an \"Export to Orbis\" action appears in the editor.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 620)
-        .onAppear { reloadDevices() }
+        .frame(width: 520, height: 760)
+        .onAppear {
+            reloadDevices()
+            refreshOrbisState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: OrbisSettings.didChange)) { _ in
+            refreshOrbisState()
+        }
     }
 
     private func reloadDevices() {
         availableCameras = CameraCapture.availableVideoDevices()
         availableMics    = CameraCapture.availableAudioDevices()
+    }
+
+    // MARK: - Orbis actions
+
+    private func refreshOrbisState() {
+        orbisHost      = OrbisSettings.shared.host
+        orbisConnected = OrbisSettings.shared.isConnected
+        orbisUserName  = OrbisSettings.shared.connectedUserName
+    }
+
+    /// Open the browser to the Orbis PAT page. The callback
+    /// (`mentor://orbis-token?…`) is handled by `AppDelegate` once
+    /// the user finishes creating a token — no further action
+    /// needed on this side.
+    private func connectOrbis() {
+        guard let url = OrbisSettings.shared.connectURL() else {
+            orbisTestResult = "Can't open host URL. Check that the host is valid."
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func disconnectOrbis() {
+        OrbisKeychain.deleteToken()
+        OrbisSettings.shared.connectedUserName = nil
+        orbisTestResult = nil
+        refreshOrbisState()
+    }
+
+    /// Hit `GET /api/auth/me`. Success → update the cached user name.
+    /// 401 → wipe the token + prompt re-auth. Anything else → show
+    /// the raw error so the user knows the server side is unhappy.
+    private func testOrbisConnection() {
+        guard let token = OrbisKeychain.loadToken() else {
+            orbisTestResult = "Not connected."
+            return
+        }
+        orbisTesting = true
+        orbisTestResult = nil
+        Task { @MainActor in
+            let client = OrbisClient(host: OrbisSettings.shared.host, token: token)
+            do {
+                let me = try await client.me()
+                OrbisSettings.shared.connectedUserName = me.name ?? me.email ?? "Connected"
+                orbisTestResult = "Connected as \(OrbisSettings.shared.connectedUserName ?? "?")."
+            } catch OrbisError.tokenInvalid {
+                OrbisKeychain.deleteToken()
+                OrbisSettings.shared.connectedUserName = nil
+                orbisTestResult = "Token expired. Reconnect to refresh."
+            } catch {
+                orbisTestResult = error.localizedDescription
+            }
+            orbisTesting = false
+            refreshOrbisState()
+        }
     }
 }

@@ -343,7 +343,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let urls = pendingOpenURLs
             pendingOpenURLs.removeAll()
             for url in urls {
-                openEditor(for: url)
+                if url.scheme == "mentor" {
+                    handleMentorScheme(url)
+                } else {
+                    openEditor(for: url)
+                }
             }
         }
     }
@@ -677,7 +681,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         for url in urls {
-            openEditor(for: url)
+            if url.scheme == "mentor" {
+                handleMentorScheme(url)
+            } else {
+                openEditor(for: url)
+            }
+        }
+    }
+
+    /// Handle `mentor://…` callbacks. Currently only one host:
+    /// `orbis-token`, emitted by the Orbis PAT page after the user
+    /// creates a token and clicks "Send to Mentor". We stash the
+    /// token in the Keychain and validate it with a `me()` call so
+    /// the Settings pane can show the connected user's name.
+    private func handleMentorScheme(_ url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return
+        }
+        switch components.host {
+        case "orbis-token":
+            let items = components.queryItems ?? []
+            guard let token = items.first(where: { $0.name == "token" })?.value,
+                  !token.isEmpty else {
+                menuBar.flashError(message: "Orbis didn't return a token — try Connect again.")
+                return
+            }
+            let userName = items.first(where: { $0.name == "user" })?.value
+            do {
+                try OrbisKeychain.saveToken(token)
+            } catch {
+                menuBar.flashError(message: "Couldn't save Orbis token to keychain: \(error.localizedDescription)")
+                return
+            }
+            // Validate in the background. If the server rejects the
+            // token we drop it so the user sees the real error on
+            // the next action instead of a silent 401 later.
+            Task { @MainActor in
+                let client = OrbisClient(host: OrbisSettings.shared.host, token: token)
+                do {
+                    let me = try await client.me()
+                    OrbisSettings.shared.connectedUserName = me.name ?? userName ?? me.email ?? "Connected"
+                    MentorDebug.log("ORBIS: connected as \(OrbisSettings.shared.connectedUserName ?? "?")")
+                } catch {
+                    MentorDebug.log("ORBIS: token validation failed: \(error.localizedDescription)")
+                    OrbisKeychain.deleteToken()
+                    OrbisSettings.shared.connectedUserName = nil
+                    menuBar.flashError(
+                        message: "Orbis rejected the token. Try Connect again."
+                    )
+                }
+            }
+        default:
+            MentorDebug.log("APP: unknown mentor:// host \(components.host ?? "nil")")
         }
     }
 

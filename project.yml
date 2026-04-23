@@ -54,8 +54,8 @@ targets:
         CFBundleDisplayName: Mentor
         # Bumped on every release. `build-dmg.sh` reads these from
         # Info.plist and threads them through the appcast entry.
-        CFBundleShortVersionString: "1.0.11"
-        CFBundleVersion: "12"
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "13"
         LSUIElement: true
         NSCameraUsageDescription: Mentor records your webcam to overlay it on screen recordings.
         NSMicrophoneUsageDescription: Mentor records your microphone for narration.
@@ -89,6 +89,15 @@ targets:
             UTTypeTagSpecification:
               public.filename-extension:
                 - mentor
+        # Custom URL scheme used by the Orbis integration's
+        # auth callback: Orbis's PAT page redirects the user back
+        # to `mentor://orbis-token?token=…&user=…` after they create
+        # a Personal Access Token for Mentor. AppDelegate captures the
+        # query and stashes the token in the Keychain.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.darrell.mentor.orbis-token
+            CFBundleURLSchemes:
+              - mentor
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.darrell.mentor
