@@ -11,8 +11,7 @@ struct PlayheadTimeLabel: View {
 
     var body: some View {
         Text(TimelineMath.timeString(viewModel.currentTime))
-            .font(.caption.weight(.medium))
-            .monospacedDigit()
+            .brandTimecode(11)
     }
 }
 
@@ -23,12 +22,13 @@ struct PlayheadLine: View {
 
     var body: some View {
         let x = TimelineMath.x(for: viewModel.currentTime, duration: viewModel.duration, width: width)
+        // Persimmon, the brand's "live / now" colour (Muesli's recording red).
         Rectangle()
-            .fill(Color.red)
+            .fill(Brand.live)
             .frame(width: 2, height: trackHeight + 6)
             .offset(x: max(0, min(width - 2, x - 1)), y: -3)
             .allowsHitTesting(false)
-            .shadow(color: Color.red.opacity(0.4), radius: 2)
+            .shadow(color: Brand.live.opacity(0.4), radius: 2)
     }
 }
 
@@ -43,7 +43,7 @@ struct SelectionWash: View {
             let a = TimelineMath.x(for: sel.start, duration: viewModel.duration, width: width)
             let b = TimelineMath.x(for: sel.end, duration: viewModel.duration, width: width)
             Rectangle()
-                .fill(Color.orange.opacity(0.4))
+                .fill(Brand.live.opacity(0.3))
                 .frame(width: max(0, b - a), height: trackHeight)
                 .offset(x: a)
                 .allowsHitTesting(false)
@@ -133,7 +133,7 @@ struct TimelineView: View {
     private func keystrokesLane(width: CGFloat) -> some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.secondary.opacity(0.06))
+                .fill(Brand.chip.opacity(0.6))
 
             // Each chip is a point-in-time event, like a soundboard
             // cue. Render as a fixed-width yellow capsule so a burst
@@ -143,12 +143,13 @@ struct TimelineView: View {
             ForEach(viewModel.keystrokeChips) { chip in
                 let x = xForTime(chip.time, width: width)
                 Capsule()
-                    .fill(Color.yellow.opacity(0.85))
+                    .fill(Brand.accentText.opacity(0.85))
                     .frame(width: 4, height: 10)
                     .offset(x: max(0, min(width - 4, x - 2)))
                     .help("\(timeString(chip.time)): \(chip.label)")
                     .onTapGesture {
                         viewModel.seek(to: chip.time)
+                        viewModel.openInspectorFeature = .keystrokes
                     }
             }
         }
@@ -160,7 +161,7 @@ struct TimelineView: View {
     private func captionsLane(width: CGFloat) -> some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.secondary.opacity(0.06))
+                .fill(Brand.chip.opacity(0.6))
 
             ForEach(viewModel.transcription?.lines ?? []) { line in
                 let startTime = CMTime(seconds: line.startSeconds, preferredTimescale: 600)
@@ -175,7 +176,7 @@ struct TimelineView: View {
                 let isFocused = viewModel.focusedCaptionLineId == line.id
                 let w = max(3, b - a)
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(isFocused ? Color.accentColor.opacity(0.9) : Color.blue.opacity(0.6))
+                    .fill(isFocused ? Color.accentColor : Brand.teal.opacity(0.85))
                     .frame(width: w, height: 10)
                     .offset(x: max(0, min(width - w, a)))
                     .help("\(timeString(startTime)): \(line.text)")
@@ -193,7 +194,7 @@ struct TimelineView: View {
     private func cueLane(width: CGFloat) -> some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.secondary.opacity(0.06))
+                .fill(Brand.chip.opacity(0.6))
 
             ForEach(viewModel.project.soundboardLog?.events ?? [], id: \.cueID) { fire in
                 let cueTime = CMTime(seconds: fire.t, preferredTimescale: 600)
@@ -201,7 +202,7 @@ struct TimelineView: View {
                 // Fixed-width orange pill centred on the fire instant —
                 // cue triggers are point-in-time events, not ranges.
                 Capsule()
-                    .fill(Color.orange.opacity(0.85))
+                    .fill(Brand.live.opacity(0.85))
                     .frame(width: 6, height: 10)
                     .offset(x: max(0, min(width - 6, x - 3)))
                     .help("\(fire.cueName) • \(timeString(cueTime))")
@@ -218,7 +219,7 @@ struct TimelineView: View {
     private func talkingHeadLane(width: CGFloat) -> some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.secondary.opacity(0.06))
+                .fill(Brand.chip.opacity(0.6))
 
             ForEach(viewModel.talkingHeadKeyframes) { kf in
                 KeyframePill(
@@ -226,10 +227,11 @@ struct TimelineView: View {
                     kf: kf,
                     trackWidth: width,
                     height: 10,
-                    color: .pink.opacity(0.7),
+                    color: Brand.emerald.opacity(0.8),
                     help: "Talking head at \(TimelineMath.timeString(kf.startTime)) — drag to move, right-edge to resize",
                     onMove: { viewModel.moveTalkingHeadKeyframe(id: $0, to: $1) },
-                    onSetHold: { viewModel.setTalkingHeadHold(id: $0, hold: $1) }
+                    onSetHold: { viewModel.setTalkingHeadHold(id: $0, hold: $1) },
+                    onSelect: { _ in viewModel.openInspectorFeature = .webcam }
                 )
             }
         }
@@ -241,7 +243,7 @@ struct TimelineView: View {
     private func zoomLane(width: CGFloat) -> some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.secondary.opacity(0.08))
+                .fill(Brand.chip.opacity(0.8))
 
             ForEach(viewModel.zoomKeyframes) { kf in
                 KeyframePill(
@@ -249,10 +251,14 @@ struct TimelineView: View {
                     kf: kf,
                     trackWidth: width,
                     height: 12,
-                    color: .purple.opacity(viewModel.zoomEnabled ? 0.7 : 0.25),
+                    color: Brand.violet.opacity(viewModel.selectedZoomID == kf.id ? 1 : (viewModel.zoomEnabled ? 0.75 : 0.3)),
                     help: "Zoom \(String(format: "%.2f×", kf.scale)) at \(TimelineMath.timeString(kf.startTime)) — drag to move, right-edge to resize",
                     onMove: { viewModel.moveZoomKeyframe(id: $0, to: $1) },
-                    onSetHold: { viewModel.setZoomKeyframeHold(id: $0, hold: $1) }
+                    onSetHold: { viewModel.setZoomKeyframeHold(id: $0, hold: $1) },
+                    onSelect: { id in
+                        viewModel.selectedZoomID = id
+                        viewModel.openInspectorFeature = .zoom
+                    }
                 )
             }
         }
@@ -266,13 +272,11 @@ struct TimelineView: View {
             PlayheadTimeLabel(viewModel: viewModel)
             Spacer()
             Text(trimSummary)
-                .font(.caption2)
+                .brandTimecode(10.5, weight: .regular)
                 .foregroundStyle(.secondary)
-                .monospacedDigit()
             Spacer()
             Text(timeString(viewModel.duration))
-                .font(.caption.weight(.medium))
-                .monospacedDigit()
+                .brandTimecode(11)
                 .foregroundStyle(.secondary)
             laneVisibilityMenu
                 .padding(.leading, 6)
@@ -341,8 +345,8 @@ struct TimelineView: View {
 
         ZStack(alignment: .leading) {
             // Base track
-            RoundedRectangle(cornerRadius: 5)
-                .fill(Color.secondary.opacity(0.15))
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Brand.chip)
 
             // Waveform behind everything else — subtle, doesn't fight
             // with the trim handles or playhead.
@@ -357,14 +361,15 @@ struct TimelineView: View {
                 .frame(width: max(0, endX - startX))
                 .offset(x: startX)
 
-            // Dimmed pre-trim
+            // Dimmed pre-trim. Washed toward the ground colour so it fades
+            // in both modes; black turned light mode into a grey slab.
             Rectangle()
-                .fill(Color.black.opacity(0.35))
+                .fill(Brand.ground.opacity(0.7))
                 .frame(width: max(0, startX))
 
             // Dimmed post-trim
             Rectangle()
-                .fill(Color.black.opacity(0.35))
+                .fill(Brand.ground.opacity(0.7))
                 .frame(width: max(0, width - endX))
                 .offset(x: endX)
 

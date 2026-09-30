@@ -21,7 +21,6 @@ final class OrbisSettings {
         static let host              = "orbis.host"
         /// Suffixed with "@<host>".
         static let userName          = "orbis.userName"
-        static let signInRequiredAfterUpgrade = "orbis.signInRequiredAfterUpgrade"
         static let lastVisibility    = "orbis.lastVisibility"
         static let lastClientID      = "orbis.lastClientID"
         static let ingestAssets      = "orbis.ingestAssets"
@@ -79,18 +78,6 @@ final class OrbisSettings {
     /// whether we're connected is `OrbisAccount.isConnected`.
     func userName(forHost host: String) -> String? {
         defaults.string(forKey: "\(Key.userName)@\(host.lowercased())")
-    }
-
-    /// 1.1.x's single display name, from the personal-token days.
-    func removeLegacyUserName() {
-        defaults.removeObject(forKey: "orbis.connectedUserName")
-    }
-
-    /// Set when an update removed this Mac's personal access token, so
-    /// Settings can ask for a one-time sign-in. See `OrbisAccount`.
-    var signInRequiredAfterUpgrade: Bool {
-        get { defaults.bool(forKey: Key.signInRequiredAfterUpgrade) }
-        set { defaults.set(newValue, forKey: Key.signInRequiredAfterUpgrade) }
     }
 
     func setUserName(_ name: String?, forHost host: String) {

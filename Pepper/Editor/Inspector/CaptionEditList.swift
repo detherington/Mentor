@@ -28,12 +28,17 @@ struct CaptionEditList: View {
             .padding(.top, 4)
         } label: {
             HStack {
-                Text("Edit lines").font(.subheadline.weight(.medium))
+                Text("Edit caption text").font(.system(size: 12.5, weight: .medium))
                 Text("\(lines.count)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
             }
+        }
+        // Opened from a timeline caption pill: the row (and this list)
+        // appears after the tap, so expand on arrival too.
+        .onAppear {
+            if vm.focusedCaptionLineId != nil { isExpanded = true }
         }
         // Expand automatically when a timeline caption pill is tapped
         // — the inspector's ScrollViewReader scrolls to the row, but

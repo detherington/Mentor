@@ -38,6 +38,8 @@ final class RecordingFlowController {
 
     /// Asked once per launch — see `confirmMissingCaptureAccess`.
     private var captureAccessWarningShown = false
+    /// The camera/mic prompts are up; ignore the record command meanwhile.
+    private var isAskingForCaptureAccess = false
 
     init(coordinator: CaptureCoordinator, menuBar: MenuBarController, soundboard: SoundboardController) {
         self.coordinator = coordinator
@@ -95,7 +97,26 @@ final class RecordingFlowController {
 
     /// Menu "Start Recording…": pick a source, count down, record.
     func start() {
-        guard state == .idle else { return }
+        guard state == .idle, !isAskingForCaptureAccess else { return }
+        // Camera or mic skipped during setup: ask now, when it's obvious
+        // why, then carry on. (Launch no longer asks.)
+        let undecided = [AVMediaType.video, .audio].filter {
+            AVCaptureDevice.authorizationStatus(for: $0) == .notDetermined
+        }
+        if !undecided.isEmpty {
+            isAskingForCaptureAccess = true
+            Task { @MainActor in
+                var granted = false
+                for type in undecided where await AVCaptureDevice.requestAccess(for: type) {
+                    granted = true
+                }
+                Permissions.shared.refresh()
+                if granted { Permissions.shared.onCaptureAccessChanged() }
+                isAskingForCaptureAccess = false
+                start()
+            }
+            return
+        }
         guard confirmMissingCaptureAccess() else { return }
         state = .picking
         let picker = sourcePicker
@@ -107,8 +128,34 @@ final class RecordingFlowController {
                 if self?.state == .picking { self?.state = .idle }
             }
         }
+        let onFailed: (Error) -> Void = { [weak self] error in
+            Task { @MainActor in
+                guard self?.state == .picking else { return }
+                self?.state = .idle
+                self?.explainScreenRecordingFailure(error)
+            }
+        }
         Task { @MainActor in
-            await picker.show(onPicked: onPicked, onCancel: onCancel)
+            await picker.show(onPicked: onPicked, onCancel: onCancel, onFailed: onFailed)
+        }
+    }
+
+    /// The picker couldn't list screens and windows. Almost always Screen
+    /// Recording: off, or switched on but not applied until Pepper reopens.
+    private func explainScreenRecordingFailure(_ error: Error) {
+        PepperDebug.log("APP: source list failed: \(error.localizedDescription)")
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Pepper can't see your screen"
+        alert.informativeText = "Switch Pepper on in System Settings → Privacy & Security → Screen & System Audio Recording. If it's already on, quit and reopen Pepper so macOS applies it."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Quit & Reopen")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: Permissions.shared.requestScreenRecording()
+        case .alertSecondButtonReturn: AppRelauncher.relaunch()
+        default: break
         }
     }
 

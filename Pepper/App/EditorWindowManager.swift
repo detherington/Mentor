@@ -39,19 +39,14 @@ final class EditorWindowManager {
 
         do {
             let project = try RecordingProject.load(bundleURL: url)
-            // Editors are windowed — app needs to show in the Dock and
-            // accept focus. Flip activation policy on first editor open.
-            if NSApp.activationPolicy() != .regular {
-                NSApp.setActivationPolicy(.regular)
-            }
+            // Editors are windowed — the app needs the Dock and focus
+            // while one is open.
             let controller = EditorWindowController(project: project)
+            DockPresence.claim(controller)
             controller.onClose = { [weak self, weak controller] in
                 guard let self, let controller else { return }
                 self.windows.removeAll { $0 === controller }
-                // If no editors remain, go back to menu-bar-only mode.
-                if self.windows.isEmpty {
-                    NSApp.setActivationPolicy(.accessory)
-                }
+                DockPresence.release(controller)
             }
             windows.append(controller)
             controller.showWindow(nil)
@@ -67,23 +62,19 @@ final class EditorWindowManager {
         panel.canChooseDirectories = true
         panel.treatsFilePackagesAsDirectories = false
         panel.allowsMultipleSelection = false
-        panel.directoryURL = Self.recordingDirectories.first
-        // The document type keeps its pre-rename identifier; it covers
-        // both .pepper and .mentor (see project.yml).
-        if let recordingType = UTType("com.darrell.mentor.recording") {
+        panel.directoryURL = CaptureCoordinator.outputDirectory
+        if let recordingType = UTType("com.darrell.pepper.recording") {
             panel.allowedContentTypes = [recordingType]
         }
-        // Temporarily promote so the open panel gets focus; drop back when done
-        // if we end up cancelling.
-        let wasAccessory = NSApp.activationPolicy() != .regular
-        if wasAccessory { NSApp.setActivationPolicy(.regular) }
+        // The panel needs focus too. Opening a recording claims the Dock
+        // for its editor before the panel lets go.
+        DockPresence.claim(panel)
         NSApp.activate(ignoringOtherApps: true)
         let response = panel.runModal()
         if response == .OK, let url = panel.url {
             open(url)
-        } else if wasAccessory, windows.isEmpty {
-            NSApp.setActivationPolicy(.accessory)
         }
+        DockPresence.release(panel)
     }
 
     func openLatestRecording() {
@@ -94,24 +85,15 @@ final class EditorWindowManager {
         open(latest)
     }
 
-    /// Where recordings live, newest location first: ~/Movies/Pepper,
-    /// then ~/Movies/Mentor from before the rename (only those that exist).
-    private static var recordingDirectories: [URL] {
-        [CaptureCoordinator.outputDirectory, CaptureCoordinator.legacyOutputDirectory]
-            .filter { FileManager.default.fileExists(atPath: $0.path) }
-    }
-
     /// The most recently *recorded* bundle, by creation date. Sorting by
     /// modification date picked whichever recording was edited last,
     /// since every editor save touches the bundle directory.
     private func latestRecordingBundle() -> URL? {
-        let bundles = Self.recordingDirectories.flatMap { dir in
-            (try? FileManager.default.contentsOfDirectory(
-                at: dir,
-                includingPropertiesForKeys: [.creationDateKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
-        }.filter(RecordingBundle.isRecording)
+        let bundles = ((try? FileManager.default.contentsOfDirectory(
+            at: CaptureCoordinator.outputDirectory,
+            includingPropertiesForKeys: [.creationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []).filter(RecordingBundle.isRecording)
         func created(_ url: URL) -> Date {
             (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
         }

@@ -16,17 +16,12 @@ import Foundation
 ///     └── metadata.json                         ← recording config at capture time
 /// ```
 struct RecordingBundle {
-    /// Extension for new recordings. Before the app was renamed Pepper
-    /// (2.0) it wrote `.mentor`; those still open in the editor. Both
-    /// share one document type, whose identifier keeps the old name
-    /// (`com.darrell.mentor.recording`) so existing files stay associated.
+    /// The bundle's extension, declared as `com.darrell.pepper.recording`.
     static let fileExtension = "pepper"
-    static let legacyFileExtension = "mentor"
 
     /// Whether `url` names a recording bundle the editor can open.
     static func isRecording(_ url: URL) -> Bool {
-        let ext = url.pathExtension.lowercased()
-        return ext == fileExtension || ext == legacyFileExtension
+        url.pathExtension.lowercased() == fileExtension
     }
 
     let finalMP4URL: URL

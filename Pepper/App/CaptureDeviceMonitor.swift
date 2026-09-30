@@ -1,11 +1,12 @@
 import AppKit
 import AVFoundation
-import ApplicationServices
 
-/// Camera + microphone access and device changes for the capture session:
-/// asks for access and brings the session up (retrying when a device
-/// appears), follows hot-plug and device picks in Settings, and prompts
-/// for Accessibility.
+/// Camera + microphone devices for the capture session: brings the
+/// session up with whatever access has been granted (retrying when a
+/// device appears), and follows hot-plug and device picks in Settings.
+/// Asking for access is the setup walkthrough's job (`Permissions`), from
+/// a button click — launch used to fire the camera, mic and
+/// Accessibility prompts all at once.
 @MainActor
 final class CaptureDeviceMonitor {
     /// True while a recording is starting, running or stopping — device
@@ -70,9 +71,10 @@ final class CaptureDeviceMonitor {
         coordinator.reconfigureDevices()
     }
 
-    func startSessionWithPermissions() async {
-        let camOK = await ensure(.video)
-        let micOK = await ensure(.audio)
+    /// Idempotent: also called when setup grants camera or mic access.
+    func startSessionIfAuthorized() {
+        let camOK = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
+        let micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         PepperDebug.log("APP: permissions cam=\(camOK) mic=\(micOK)")
         // Either one is enough — `configure()` sets up whichever input is
         // authorised. Requiring both meant a denied camera also meant no
@@ -102,10 +104,8 @@ final class CaptureDeviceMonitor {
     private func deviceConnected() {
         if !coordinator.cameraCapture.isConfigured {
             PepperDebug.log("APP: device connected — retrying camera setup")
-            Task { @MainActor in
-                await self.startSessionWithPermissions()
-                self.onSessionChanged()
-            }
+            startSessionIfAuthorized()
+            onSessionChanged()
         } else {
             PepperDebug.log("APP: device connected — reconfiguring inputs")
             coordinator.reconfigureDevices(keepConnectedDevices: isRecordingInFlight())
@@ -125,21 +125,4 @@ final class CaptureDeviceMonitor {
         }
     }
 
-    private func ensure(_ type: AVMediaType) async -> Bool {
-        let status = AVCaptureDevice.authorizationStatus(for: type)
-        if status == .notDetermined {
-            return await AVCaptureDevice.requestAccess(for: type)
-        }
-        return status == .authorized
-    }
-
-    /// Trigger the Accessibility prompt if the user hasn't granted it yet.
-    /// Needed so `NSEvent.addGlobalMonitorForEvents` actually receives mouse
-    /// and key events outside Pepper — that's the backbone of the event log
-    /// used by the editor's smart-zoom feature.
-    func promptForAccessibility() {
-        let promptKey = kAXTrustedCheckOptionPrompt.takeRetainedValue() as String
-        let options: CFDictionary = [promptKey: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-    }
 }

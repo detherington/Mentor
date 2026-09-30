@@ -34,15 +34,14 @@ struct RecordingProject {
         var errorDescription: String? {
             switch self {
             case .notARecordingBundle(let url):
-                return "\(url.lastPathComponent) isn't a Pepper recording (.pepper or .mentor)."
+                return "\(url.lastPathComponent) isn't a Pepper recording."
             case .missingMetadata(let url):
                 return "\(url.lastPathComponent) is missing metadata.json."
             }
         }
     }
 
-    /// Load a `RecordingProject` from a sidecar `.pepper` (or pre-2.0
-    /// `.mentor`) directory URL.
+    /// Load a `RecordingProject` from a sidecar `.pepper` directory URL.
     static func load(bundleURL: URL) throws -> RecordingProject {
         guard RecordingBundle.isRecording(bundleURL) else {
             throw LoadError.notARecordingBundle(bundleURL)

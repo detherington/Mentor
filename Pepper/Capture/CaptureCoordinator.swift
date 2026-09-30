@@ -103,22 +103,13 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     static var outputDirectory: URL {
-        moviesDirectory.appendingPathComponent("Pepper", isDirectory: true)
-    }
-
-    /// Where recordings were saved before the app was renamed Pepper.
-    /// Never written to; the editor still finds recordings there.
-    static var legacyOutputDirectory: URL {
-        moviesDirectory.appendingPathComponent("Mentor", isDirectory: true)
-    }
-
-    private static var moviesDirectory: URL {
-        (try? FileManager.default.url(
+        let movies = (try? FileManager.default.url(
             for: .moviesDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
         )) ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Movies")
+        return movies.appendingPathComponent("Pepper", isDirectory: true)
     }
 
     /// Start the camera+mic session for live preview. Idempotent.

@@ -68,6 +68,14 @@ final class EditorViewModel {
     /// so selection doesn't linger.
     var focusedCaptionLineId: UUID?
 
+    /// The inspector row that's open (one at a time). Lives here, not in
+    /// the view, so the timeline and preview can open a row: clicking a
+    /// zoom opens Smart zoom, dragging the webcam opens the webcam row.
+    var openInspectorFeature: InspectorFeature?
+    /// The zoom picked on the timeline, edited on its own in the Smart
+    /// zoom row. Cleared when that zoom is removed.
+    var selectedZoomID: UUID?
+
     /// Convenience: normalised range from `selectionStart` to
     /// `currentTime`, or nil if no mark is set. Clamped to the outer
     /// trim so you can't select into already-trimmed regions.
@@ -1730,8 +1738,86 @@ final class EditorViewModel {
     }
 
     func removeZoomKeyframe(id: UUID) {
+        if selectedZoomID == id { selectedZoomID = nil }
         commitKeyframes(\.zoomKeyframes, zoomKeyframes.filter { $0.id != id },
                         saving: .zoom, actionName: "Remove Zoom")
+    }
+
+    /// Inspector "How close": one peak scale for every zoom, and for
+    /// zooms added or regenerated later. One undo step (per drag).
+    func setScaleForAllZooms(_ scale: CGFloat) {
+        let clamped = max(1.0, min(2.5, scale))
+        var tuning = zoomTuning
+        tuning.scale = clamped
+        zoomTuning = tuning
+        let updated = zoomKeyframes.map { kf -> ZoomKeyframe in
+            var k = kf
+            k.scale = clamped
+            return k
+        }
+        guard updated != zoomKeyframes else { return }
+        commitKeyframes(\.zoomKeyframes, updated, saving: .zoom,
+                        actionName: "Change Zoom Closeness", coalesceKey: "zoomScaleAll")
+    }
+
+    /// Inspector "How long it stays zoomed". Shifts every zoom's hold by
+    /// the change rather than setting one length: an auto zoom's hold
+    /// spans its whole cluster of clicks plus this trailing time, so a
+    /// flat value would cut long clusters short.
+    func setHoldForAllZooms(_ seconds: TimeInterval) {
+        let delta = seconds - zoomTuning.holdSeconds
+        guard delta != 0 else { return }
+        var tuning = zoomTuning
+        tuning.holdSeconds = seconds
+        zoomTuning = tuning
+        var updated = zoomKeyframes
+        for kf in zoomKeyframes {
+            guard let current = updated.first(where: { $0.id == kf.id }) else { continue }
+            let hold = CMTimeGetSeconds(CMTimeSubtract(current.holdEndTime, CMTimeAdd(current.startTime, current.inDuration)))
+            let target = CMTime(seconds: hold + delta, preferredTimescale: 600)
+            if let next = RampKeyframes.settingHold(updated, id: kf.id, hold: target, duration: duration) {
+                updated = next
+            }
+        }
+        guard updated != zoomKeyframes else { return }
+        commitKeyframes(\.zoomKeyframes, updated, saving: .zoom,
+                        actionName: "Change Zoom Length", coalesceKey: "zoomHoldAll")
+    }
+
+    /// Inspector: one size for every full-screen (talking-head) moment.
+    func setSizeForAllTalkingHeads(_ fraction: CGFloat) {
+        let clamped = max(0.2, min(0.95, fraction))
+        let updated = talkingHeadKeyframes.map { kf -> TalkingHeadKeyframe in
+            var k = kf
+            k.targetDiameterFraction = clamped
+            return k
+        }
+        guard updated != talkingHeadKeyframes else { return }
+        commitKeyframes(\.talkingHeadKeyframes, updated, saving: .talkingHead,
+                        actionName: "Change Full-Screen Size", coalesceKey: "thSizeAll")
+    }
+
+    /// True while "Polish my video" still has work running.
+    var isPolishing: Bool { isTranscribing || isAutoCutting }
+
+    /// Inspector "Polish my video": what most walkthroughs want — zooms
+    /// on the clicks, captions, long pauses cut. Each part is its own
+    /// undo step, and running it again is safe: auto-cut merges with
+    /// existing cuts and captions are only written once.
+    func quickPolish() {
+        zoomEnabled = true
+        if zoomKeyframes.isEmpty, loggedClickCount > 0 {
+            regenerateZoomFromClicks()
+        }
+        if transcription == nil {
+            generateCaptions()
+        }
+        if !captionStyle.enabled {
+            var style = captionStyle
+            style.enabled = true
+            captionStyle = style
+        }
+        autoCutSilences()
     }
 
     /// Move a zoom keyframe so it starts at `newStart`, keeping its length

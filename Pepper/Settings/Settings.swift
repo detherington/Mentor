@@ -137,6 +137,14 @@ final class Settings {
         /// Per-lane timeline visibility overrides (auto/show/hide).
         static let timelineLanePrefs = "timelineLanePrefs"
 
+        /// Set when the setup walkthrough finishes; until then it shows
+        /// at launch.
+        static let hasCompletedOnboarding = "hasCompletedOnboarding"
+        /// The walkthrough step on screen, so a relaunch mid-setup
+        /// (macOS asks to Quit & Reopen after Screen Recording is
+        /// switched on) resumes where it left off.
+        static let onboardingStep = "onboardingStep"
+
         // Live soundboard cues — shared across all recordings.
         static let soundboardCues = "soundboardCues"
         /// When true, silence the soundboard's speaker output during
@@ -202,6 +210,17 @@ final class Settings {
     var captureSystemAudio: Bool {
         get { defaults.bool(forKey: Key.captureSystemAudio) }
         set { defaults.set(newValue, forKey: Key.captureSystemAudio); post() }
+    }
+
+    var hasCompletedOnboarding: Bool {
+        get { defaults.bool(forKey: Key.hasCompletedOnboarding) }
+        set { defaults.set(newValue, forKey: Key.hasCompletedOnboarding) }
+    }
+
+    /// Not posted: it changes on every step and nothing observes it.
+    var onboardingStep: String? {
+        get { defaults.string(forKey: Key.onboardingStep) }
+        set { defaults.set(newValue, forKey: Key.onboardingStep) }
     }
 
     var countdownEnabled: Bool {

@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 struct EditorView: View {
     @State private var viewModel: EditorViewModel
     @State private var showOrbisSheet = false
+    @State private var showRecordingInfo = false
 
     /// The window controller owns the view model (quit + close handling
     /// need to reach it); the view just holds it for SwiftUI.
@@ -20,6 +21,7 @@ struct EditorView: View {
         @Bindable var vm = viewModel
 
         return content(vm: vm)
+            .toolbar { toolbarContent(vm: vm) }
             .sheet(isPresented: Binding(
                 get: { vm.isExporting || vm.exportError != nil },
                 set: { if !$0 { vm.exportError = nil } }
@@ -88,8 +90,8 @@ struct EditorView: View {
             }
             .frame(minWidth: 600)
 
-            inspector(vm: vm)
-                .frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
+            EditorInspector(vm: vm)
+                .frame(minWidth: 300, idealWidth: 330, maxWidth: 420)
         }
         .frame(minWidth: 960, minHeight: 600)
         .focusable()
@@ -201,6 +203,8 @@ struct EditorView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(height: timelineHeight(vm: vm))
+            // Muesli's ground strip, like its chat bar.
+            .background(Brand.ground)
             .animation(.easeInOut(duration: 0.18), value: timelineHeight(vm: vm))
     }
 
@@ -217,222 +221,68 @@ struct EditorView: View {
         return h
     }
 
-    // MARK: - Inspector
+    // MARK: - Toolbar
 
-    @ViewBuilder
-    private func inspector(vm: EditorViewModel) -> some View {
-        @Bindable var vm = vm
-
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Recording").font(.headline)
-                    LabeledRow("Captured", value: vm.project.metadata.startDate.formatted(
-                        date: .abbreviated, time: .shortened
-                    ))
-                    LabeledRow("Source", value: vm.project.metadata.source.kind.capitalized)
-                    LabeledRow("Screen", value: dimensions(vm.project.metadata.screenPixelSize))
-                    LabeledRow("Webcam", value: dimensions(vm.project.metadata.webcamPixelSize))
-                    if let events = vm.project.eventLog?.events {
-                        LabeledRow("Events logged", value: "\(events.count)")
-                    }
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Webcam overlay").font(.headline)
-
-                    // Pop-up menus, not segmented controls, for Shape and the
-                    // background effect: segmented, "Rounded Square" and
-                    // "Transparent" can't shrink below ~380 pt, wider than
-                    // the inspector column can get — so the column's content
-                    // overflowed and was clipped on both sides.
-                    Picker("Shape", selection: $vm.webcamShape) {
-                        ForEach(WebcamShape.allCases) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.menu)
-
-                    Picker("Position", selection: $vm.webcamPosition) {
-                        ForEach(WebcamPosition.allCases) { Text($0.label).tag($0) }
-                    }
-
-                    HStack {
-                        Text("Size")
-                        Slider(value: $vm.webcamDiameter, in: vm.diameterMin...vm.diameterMax)
-                        Text(points(vm.webcamDiameter, scale: vm.backingScale))
-                            .monospacedDigit()
-                            .frame(width: 64, alignment: .trailing)
-                    }
-
-                    HStack {
-                        Text("Inset")
-                        Slider(value: $vm.webcamInset, in: 0...(vm.diameterMax * 0.6))
-                        Text(points(vm.webcamInset, scale: vm.backingScale))
-                            .monospacedDigit()
-                            .frame(width: 64, alignment: .trailing)
-                    }
-
-                    Text("Changes preview live. Original recording is untouched — changes only affect export.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    WebcamBackgroundControls(vm: vm)
-                }
-                .disabled(vm.isExporting)
-
-                Divider()
-
-                SmartZoomSection(vm: vm)
-                    .disabled(vm.isExporting)
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Click ripples", isOn: $vm.cursorRipplesEnabled)
-                        .font(.headline)
-                    Text(cursorRippleHint(vm: vm))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .disabled(vm.isExporting)
-
-                Divider()
-
-                CursorHighlightSection(vm: vm)
-
-                WebcamTransitionsSection(vm: vm)
-
-                Divider()
-
-                TalkingHeadSection(vm: vm)
-
-                Divider()
-
-                AudioMixSection(vm: vm)
-
-                Divider()
-
-                CaptionsSection(vm: vm)
-
-                Divider()
-
-                KeystrokesSection(vm: vm)
-
-                Divider()
-
-                CutsSection(vm: vm)
-
-                Divider()
-
-                TitleCardsSection(vm: vm)
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Picker("Quality", selection: $vm.exportQuality) {
-                        ForEach(ExportQuality.allCases) { q in
-                            Text(q.label).tag(q)
-                        }
-                    }
-                    Text(vm.exportQuality.sizeHint)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .disabled(vm.isExporting)
-
-                Button {
-                    runExportSavePanel(viewModel: vm)
-                } label: {
-                    Label("Export…", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.large)
-                .disabled(vm.isExporting || vm.isLoading || vm.loadError != nil)
-
-                // Orbis export — only shown when signed in. Someone who
-                // used it before the switch to Orbis sign-in gets a hint
-                // instead of the button silently vanishing. (`OrbisAccount`
-                // is observable, so the button appears as soon as the
-                // user signs in — no editor redraw needed.)
-                if OrbisAccount.shared.isConnected {
-                    Button {
-                        showOrbisSheet = true
-                    } label: {
-                        Label("Export to Orbis…", systemImage: "arrow.up.circle")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .controlSize(.large)
-                    .disabled(vm.isExporting || vm.isLoading || vm.loadError != nil)
-                } else if OrbisAccount.shared.needsSignInAfterUpgrade {
-                    Text("To export to Orbis again, sign in from Settings → Orbis.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-
-                Text("Renders a new MP4 with the webcam layout above baked in. Original bundle is untouched.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                }
-                .padding()
+    /// Export and the recording's details, in the window toolbar. They
+    /// used to sit at the top (details) and very bottom (export) of the
+    /// inspector, where export was the hardest thing to find.
+    @ToolbarContentBuilder
+    private func toolbarContent(vm: EditorViewModel) -> some ToolbarContent {
+        let unavailable = vm.isExporting || vm.isLoading || vm.loadError != nil
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                showRecordingInfo.toggle()
+            } label: {
+                Label("Recording details", systemImage: "info.circle")
             }
-            // Timeline caption-pill taps set `focusedCaptionLineId`;
-            // scroll this pane so the matching row is on screen. Runs
-            // on the next layout pass so the DisclosureGroup inside
-            // CaptionEditList has time to expand first.
-            .onChange(of: vm.focusedCaptionLineId) { _, newValue in
-                guard let id = newValue else { return }
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        proxy.scrollTo(id, anchor: .center)
-                    }
-                }
+            .help("Recording details")
+            .popover(isPresented: $showRecordingInfo, arrowEdge: .bottom) {
+                recordingInfo(vm: vm)
             }
         }
+        if OrbisAccount.shared.isConnected {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showOrbisSheet = true
+                } label: {
+                    Label("Send to Orbis", systemImage: "arrow.up.circle")
+                        .labelStyle(.titleAndIcon)
+                }
+                .help("Upload this video to your Orbis library")
+                .disabled(unavailable)
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                runExportSavePanel(viewModel: vm)
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Brand.accent)
+            .help("Save the edited video as an MP4")
+            .disabled(unavailable)
+        }
+    }
+
+    private func recordingInfo(vm: EditorViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Recording").brandKicker(10.5)
+            LabeledRow("Recorded", value: vm.project.metadata.startDate.formatted(date: .abbreviated, time: .shortened))
+            LabeledRow("Source", value: vm.project.metadata.source.kind.capitalized)
+            LabeledRow("Screen", value: dimensions(vm.project.metadata.screenPixelSize))
+            LabeledRow("Webcam", value: dimensions(vm.project.metadata.webcamPixelSize))
+            if let events = vm.project.eventLog?.events {
+                LabeledRow("Clicks & keys", value: "\(events.count)")
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
     }
 
     private func dimensions(_ size: RecordingMetadata.CGSizeCodable) -> String {
         "\(Int(size.width)) × \(Int(size.height))"
-    }
-
-    /// "mm:ss.t" — shared between the inspector + timeline for consistent
-    /// time labelling.
-    private func timeString(_ t: CMTime) -> String {
-        TimelineMath.timeString(t)
-    }
-
-    // MARK: - Webcam transitions section
-
-    // MARK: - Smart zoom section
-
-    // MARK: - Captions section
-
-    // MARK: - Webcam background controls
-
-    // MARK: - Cursor highlight section
-
-    // MARK: - Keystrokes overlay section
-
-    // MARK: - Cuts section (ripple-delete middle regions)
-
-    // MARK: - Audio mix section
-
-    // MARK: - Talking head section
-
-    // MARK: - Title cards section
-
-    private func cursorRippleHint(vm: EditorViewModel) -> String {
-        let n = vm.cursorRipples.count
-        if n == 0 {
-            return "No clicks logged for this recording — nothing to ripple."
-        }
-        return "\(n) click\(n == 1 ? "" : "s") will pulse a yellow ring on screen."
-    }
-
-    private func points(_ pixels: CGFloat, scale: CGFloat) -> String {
-        let pts = Int(pixels / max(scale, 1))
-        return "\(pts)pt"
     }
 
     // MARK: - Export save panel
@@ -444,8 +294,9 @@ struct EditorView: View {
         panel.nameFieldStringValue = vm.suggestedExportFilename
         panel.canCreateDirectories = true
         panel.directoryURL = vm.suggestedExportDirectory
-        panel.title = "Export Edited Video"
-        panel.message = "Render the composited MP4 with the webcam layout above."
+        panel.title = "Export Video"
+        panel.message = "Save your edited video as an MP4."
+        panel.accessoryView = ExportOptionsAccessory.make(viewModel: vm)
 
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -544,7 +395,8 @@ struct EditorView: View {
                     .frame(width: baseRect.width, height: baseRect.height)
                     .position(x: baseRect.midX, y: baseRect.midY)
                     .gesture(dragGesture)
-                    .help("Drag to reposition. Pick a corner in the inspector to reset.")
+                    .simultaneousGesture(TapGesture().onEnded { vm.openInspectorFeature = .webcam })
+                    .help("Drag to move the webcam. Click it to change its look.")
 
                 // Dashed preview outline — only drawn during drag.
                 // Lives in a full-preview container with hit-testing
@@ -570,6 +422,8 @@ struct EditorView: View {
                     let sy = fit.height / img.height
                     if dragStart == nil {
                         dragStart = vm.webcamBaseOrigin
+                        // Moving the webcam: show its settings.
+                        vm.openInspectorFeature = .webcam
                     }
                     guard let start = dragStart else { return }
                     let dx = value.translation.width / sx

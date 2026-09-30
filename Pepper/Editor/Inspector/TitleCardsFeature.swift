@@ -16,41 +16,68 @@ private enum TitleCardThumbnails {
     }
 }
 
-/// Inspector: start and end title cards.
-struct TitleCardsSection: View {
+/// Title cards row: an opening title before the video and a closing
+/// card after it.
+struct TitleCardsFeature: View {
     @Bindable var vm: EditorViewModel
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Title cards").font(.headline)
+    /// On when either card is. Switching on adds the opening title;
+    /// off removes both.
+    static func isOn(_ vm: EditorViewModel) -> Binding<Bool> {
+        Binding(
+            get: { vm.startCard.enabled || vm.endCard.enabled },
+            set: { on in
+                var start = vm.startCard
+                var end = vm.endCard
+                if on {
+                    start.enabled = true
+                } else {
+                    start.enabled = false
+                    end.enabled = false
+                }
+                vm.startCard = start
+                vm.endCard = end
+            }
+        )
+    }
 
-            cardEditor(
-                label: "Start card",
-                card: Binding(get: { vm.startCard }, set: { vm.startCard = $0 })
-            )
-
-            cardEditor(
-                label: "End card",
-                card: Binding(get: { vm.endCard }, set: { vm.endCard = $0 })
-            )
-
-            Text("Cards fade between solid screen and the recording. Only included in the exported MP4 — auto-rendered recordings have no cards.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    static func status(_ vm: EditorViewModel) -> String {
+        switch (vm.startCard.enabled, vm.endCard.enabled) {
+        case (true, true):   return "Opening title and closing card"
+        case (true, false):  return "Opening title"
+        case (false, true):  return "Closing card"
+        case (false, false): return "Off"
         }
-        .disabled(vm.isExporting)
+    }
+
+    var body: some View {
+        cardEditor(
+            label: "Opening title",
+            card: Binding(get: { vm.startCard }, set: { vm.startCard = $0 })
+        )
+
+        Divider()
+
+        cardEditor(
+            label: "Closing card",
+            card: Binding(get: { vm.endCard }, set: { vm.endCard = $0 })
+        )
+
+        Note("Cards fade in and out around your recording. They appear only in videos you export.")
     }
 
     @ViewBuilder
     private func cardEditor(label: String, card: Binding<TitleCard>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Toggle(label, isOn: card.enabled)
-                .font(.subheadline.weight(.semibold))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: 12.5, weight: .semibold))
 
             if card.wrappedValue.enabled {
                 TextField("Title", text: card.title)
                     .textFieldStyle(.roundedBorder)
-                TextField("Subtitle (optional)", text: card.subtitle)
+                TextField("Second line (optional)", text: card.subtitle)
                     .textFieldStyle(.roundedBorder)
 
                 // Font family picker — null (system default) plus a
@@ -99,7 +126,7 @@ struct TitleCardsSection: View {
                         get: { card.wrappedValue.textColor.swiftUIColor },
                         set: { card.wrappedValue.textColor = ColorRGBA(swiftUI: $0) }
                     ))
-                    ColorPicker("Background", selection: Binding(
+                    ColorPicker("Fill", selection: Binding(
                         get: { card.wrappedValue.backgroundColor.swiftUIColor },
                         set: { card.wrappedValue.backgroundColor = ColorRGBA(swiftUI: $0) }
                     ))
@@ -111,13 +138,11 @@ struct TitleCardsSection: View {
                 // move/rename/delete without breaking the card.
                 cardImageControls(card: card)
 
-                HStack {
-                    Text("Fade")
-                    Slider(value: card.fadeDuration, in: 0.5...4)
-                    Text(String(format: "%.1fs", card.wrappedValue.fadeDuration))
-                        .monospacedDigit()
-                        .frame(width: 48, alignment: .trailing)
-                }
+                PlainSlider(
+                    label: "Fade",
+                    value: card.fadeDuration,
+                    range: 0.5...4, low: "Quick", high: "Slow"
+                )
             }
         }
     }
@@ -125,7 +150,7 @@ struct TitleCardsSection: View {
     @ViewBuilder
     private func cardImageControls(card: Binding<TitleCard>) -> some View {
         HStack(spacing: 8) {
-            Text("Image")
+            Text("Picture")
             if let filename = card.wrappedValue.backgroundImageFilename,
                !filename.isEmpty {
                 // Small thumbnail so the user can confirm which image

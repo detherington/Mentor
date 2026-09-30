@@ -32,7 +32,6 @@ struct OrbisExportSheet: View {
         let defaultTitle = vm.project.bundleURL.deletingPathExtension()
             .lastPathComponent
             .replacingOccurrences(of: "Pepper_", with: "")
-            .replacingOccurrences(of: "Mentor_", with: "")  // pre-2.0 recordings
             .replacingOccurrences(of: "_", with: " ")
         _title           = State(initialValue: defaultTitle)
         _visibility      = State(initialValue: OrbisSettings.shared.lastVisibility)

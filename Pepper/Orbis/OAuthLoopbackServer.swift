@@ -34,10 +34,8 @@ final class OAuthLoopbackServer: @unchecked Sendable {
     /// A result that arrived before anyone was waiting for it.
     private var pendingResult: Result<[String: String], Error>?
     private var connections: [NWConnection] = []
-    private let successMessage: String
 
-    init(successMessage: String) throws {
-        self.successMessage = successMessage
+    init() throws {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
         parameters.allowLocalEndpointReuse = true
@@ -112,14 +110,9 @@ final class OAuthLoopbackServer: @unchecked Sendable {
             let request = String(decoding: data ?? Data(), as: UTF8.self)
             let (path, params) = Self.parse(request)
             let isCallback = path == "/callback" && (params["code"] != nil || params["error"] != nil)
-            let body: String
-            if !isCallback {
-                body = Self.page("Waiting for Orbis sign-in…")
-            } else if let error = params["error"] {
-                body = Self.page("Sign-in didn't complete (\(Self.escape(params["error_description"] ?? error))). You can close this window and try again from Pepper.")
-            } else {
-                body = Self.page("\(successMessage) You can close this window.")
-            }
+            let body = SignInPage.html(
+                !isCallback ? .waiting : params["error"] != nil ? .failed : .signedIn
+            )
             let response = "HTTP/1.1 \(isCallback ? "200 OK" : "404 Not Found")\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
             connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
                 connection.cancel()
@@ -138,16 +131,6 @@ final class OAuthLoopbackServer: @unchecked Sendable {
         var params: [String: String] = [:]
         for item in components.queryItems ?? [] { params[item.name] = item.value ?? "" }
         return (components.path, params)
-    }
-
-    private static func page(_ message: String) -> String {
-        "<html><head><meta charset='utf-8'><title>Pepper</title></head><body style='font-family:-apple-system;padding:40px'><h2>Pepper</h2><p>\(message)</p></body></html>"
-    }
-
-    private static func escape(_ s: String) -> String {
-        s.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     private func resumeReady(_ result: Result<UInt16, Error>) {

@@ -29,6 +29,8 @@ struct KeyframePill<K: RampKeyframe>: View {
     let help: String
     let onMove: (_ id: UUID, _ newStart: CMTime) -> Void
     let onSetHold: (_ id: UUID, _ hold: CMTime) -> Void
+    /// A click (not a drag): opens this keyframe's inspector row.
+    var onSelect: (_ id: UUID) -> Void = { _ in }
 
     @State private var moveBaseline: CMTime?
     @State private var resizeBaseline: CMTime?
@@ -55,7 +57,10 @@ struct KeyframePill<K: RampKeyframe>: View {
         .offset(x: startX)
         .help(help)
         .gesture(moveGesture)
-        .onTapGesture { viewModel.seek(to: kf.peakStartTime) }
+        .onTapGesture {
+            viewModel.seek(to: kf.peakStartTime)
+            onSelect(kf.id)
+        }
     }
 
     private var moveGesture: some Gesture {

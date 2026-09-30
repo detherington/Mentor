@@ -13,9 +13,14 @@ final class SourcePickerWindow: NSObject, NSWindowDelegate {
     /// flight — cancel as soon as it returns instead of presenting.
     private var dismissRequested = false
 
+    /// `onFailed` when the shareable-content query fails — in practice,
+    /// Screen Recording is off (or on but not yet applied: macOS only
+    /// applies it after Pepper reopens). This used to end in `onCancel`,
+    /// so the record command just did nothing.
     func show(
         onPicked: @escaping (CaptureSource) -> Void,
-        onCancel: @escaping () -> Void
+        onCancel: @escaping () -> Void,
+        onFailed: @escaping (Error) -> Void
     ) async {
         dismissRequested = false
         do {
@@ -32,7 +37,8 @@ final class SourcePickerWindow: NSObject, NSWindowDelegate {
             self.onCancel = onCancel
             present(content: content)
         } catch {
-            onCancel()
+            dismissRequested = false
+            onFailed(error)
         }
     }
 

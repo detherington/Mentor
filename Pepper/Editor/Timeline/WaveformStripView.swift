@@ -30,9 +30,10 @@ struct WaveformStripView: View {
                 path.addLine(to: CGPoint(x: x, y: midY + h))
                 i += stride
             }
+            // Ink, not white: white vanished on the light-mode track.
             context.stroke(
                 path,
-                with: .color(.white.opacity(0.8)),
+                with: .color(.primary.opacity(0.7)),
                 lineWidth: lineWidth
             )
         }

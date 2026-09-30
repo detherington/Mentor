@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Modal sheet shown over the editor window during export, with progress
 /// bar + cancel + error-state handling.
@@ -78,5 +79,38 @@ struct ExportSheet: View {
             return "Export cancelled"
         }
         return "Export failed"
+    }
+}
+
+/// The Quality choice, shown in the Export save panel. It used to be a
+/// picker at the bottom of the inspector, far from the button it
+/// affected.
+enum ExportOptionsAccessory {
+    @MainActor
+    static func make(viewModel vm: EditorViewModel) -> NSView {
+        let host = NSHostingView(rootView: ExportOptionsView(vm: vm))
+        host.frame.size = host.fittingSize
+        return host
+    }
+}
+
+private struct ExportOptionsView: View {
+    @Bindable var vm: EditorViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Picker("Quality", selection: $vm.exportQuality) {
+                ForEach(ExportQuality.allCases) { quality in
+                    Text(quality.label).tag(quality)
+                }
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            Text(vm.exportQuality.sizeHint)
+                .foregroundStyle(.secondary)
+                .frame(width: 170, alignment: .leading)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 20)
     }
 }

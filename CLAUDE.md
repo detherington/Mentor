@@ -13,35 +13,15 @@ compositing, Sparkle for auto-update.
 
 Distribution: same model as Muesli. Orbis serves releases from
 `https://sbsorbis.com/download/pepper/` (Sparkle appcast + update zips +
-DMGs); its Pepper download page links the newest DMG. The `appcast.xml`
-in this repo is a legacy feed for Mentor copies up to 1.1.1. LSUIElement app
+DMGs); its Pepper download page links the newest DMG. The repo is still
+named `Mentor` (the app's working name before 2.0). LSUIElement app
 (menu-bar only by default; promotes to `.regular` activation when an editor
 window opens, demotes back on last-editor close).
 
 Single-maintainer project; ship cadence is "whenever a feature's ready."
-Version is `MARKETING_VERSION` in `project.yml` — currently 2.0.0. The
+Version is `MARKETING_VERSION` in `project.yml` — currently 1.0.0. The
 build number (`CURRENT_PROJECT_VERSION`) is a UTC `YYYYMMDDHHMM`
-timestamp set by the release script; the last GitHub-era build was 14.
-
-## Formerly Mentor
-
-The app was called **Mentor** until 2.0. The repo (`detherington/Mentor`,
-`~/Mentor`) keeps that name, and so do identifiers that existing installs
-depend on. **Don't rename these:**
-
-| Identifier | Why it stays |
-| --- | --- |
-| Bundle ID `com.darrell.mentor` | macOS privacy grants, UserDefaults and Sparkle's update matching are keyed on it |
-| UTI `com.darrell.mentor.recording` | the document type; now covers `.pepper` and `.mentor` |
-| Keychain service `com.sbscomms.mentor.orbis` | existing Orbis sign-ins |
-| OAuth client `mentor-mac` | Orbis issued every existing sign-in to it |
-| `~/Library/Application Support/Mentor/TitleCards/` | saved title cards reference images there |
-| legacy `appcast.xml` on GitHub `main` | Mentor 1.x copies poll its raw URL |
-
-New recordings are `.pepper` in `~/Movies/Pepper`; `.mentor` bundles and
-`~/Movies/Mentor` still open (`RecordingBundle.isRecording`). Sparkle
-installs updates under the old file name, so `LegacyAppName` renames
-`Mentor.app` → `Pepper.app` once at launch and relaunches.
+timestamp set by the release script.
 
 ## Source of truth is `project.yml`
 
@@ -177,14 +157,14 @@ the same time base the editor uses for seeking. Don't mix wall-clock
 
 | Folder | Responsibility |
 | --- | --- |
-| `Pepper/App/` | `AppDelegate` (entry point + wiring, shortcuts, quit), `RecordingFlowController` (picker → countdown → record → stop state machine, post-recording render), `EditorWindowManager` (editor windows + activation-policy flipping), `CaptureDeviceMonitor` (camera/mic permissions, hot-plug), `OpenURLRouter` (open-file Apple Events, duplicate-instance hand-off), `MainMenu`, `MenuBarController`, `PepperDebug` log |
+| `Pepper/App/` | `AppDelegate` (entry point + wiring, shortcuts, quit), `Permissions` (read-only status + button-driven requests for Screen Recording, Camera, Mic, Accessibility), `DockPresence` (claims that keep the app `.regular`), `AppRelauncher`, `RecordingFlowController` (picker → countdown → record → stop state machine, post-recording render), `EditorWindowManager` (editor windows + activation-policy flipping), `CaptureDeviceMonitor` (camera/mic permissions, hot-plug), `OpenURLRouter` (open-file Apple Events, duplicate-instance hand-off), `MainMenu`, `MenuBarController`, `PepperDebug` log |
 | `Pepper/Capture/` | `CaptureCoordinator`, `PauseClock`, `ScreenCapture` (SCStream), `CameraCapture` (AVCaptureSession), `CaptureContention` (detect Granola/Wispr/etc holding the mic), `SampleBufferRetiming` |
 | `Pepper/Recording/` | `TrackWriter` (one writer for all four raw tracks), `EventRecorder`, `CursorSampler`, `RecordingBundle` layout, `TeleprompterController` |
 | `Pepper/Soundboard/` | Soundboard engine + cues + hotkey binding |
-| `Pepper/Editor/` | `RecordingProject`, `EditorComposition`, `LiveCompositor`, `OverlaySettings` (the one value both preview and export render from), `EditorViewModel`, `EditState` + `SidecarStore` (per-recording edits, debounced saves), keyframe models + `RampKeyframe` (shared zoom/talking-head editing rules), `SilenceAnalyzer`, `SourceCoordinateMapper`, `TrimMap`; `EditorView` with `Inspector/` (one view per section), `Timeline/`, `ExportSheet` |
+| `Pepper/Editor/` | `RecordingProject`, `EditorComposition`, `LiveCompositor`, `OverlaySettings` (the one value both preview and export render from), `EditorViewModel`, `EditState` + `SidecarStore` (per-recording edits, debounced saves), keyframe models + `RampKeyframe` (shared zoom/talking-head editing rules), `SilenceAnalyzer`, `SourceCoordinateMapper`, `TrimMap`; `EditorView` (window toolbar: details, Send to Orbis, Export) with `Inspector/` (`EditorInspector`: plain-language feature rows with switches, one open at a time via `vm.openInspectorFeature`, plus Quick polish; timeline/preview clicks open the matching row), `Timeline/`, `ExportSheet` (+ the save panel's Quality accessory) |
 | `Pepper/Rendering/` | `FinalRenderer` (reader → compositor → writer), `ExportQuality`, `SRTFormatter` |
-| `Pepper/Orbis/` | "Export to Orbis": `OrbisAccount` (connection owner — OAuth 2.1 PKCE + loopback sign-in as client `mentor-mac`, scope `videos`, same flow as Muesli; refresh/revoke; personal access tokens are no longer supported and are purged on upgrade), `OAuthLoopbackServer`, `OrbisClient` (REST; asks `OrbisAccount` for a credential per request), `OrbisExportController` (FinalRenderer → presigned R2 PUT → ingest-assets), `OrbisExportSheet`, `OrbisKeychain` (refresh token keyed per host, never UserDefaults), `OrbisSettings` (host + last-used form values). No `mentor://` URL scheme any more — it was a token-injection hole |
-| `Pepper/UI/` | SwiftUI/AppKit windows (Settings, Soundboard, SourcePicker, RegionSelector, Countdown, RecordingBorder, WebcamPreview, Teleprompter) |
+| `Pepper/Orbis/` | "Export to Orbis": `OrbisAccount` (connection owner — OAuth 2.1 PKCE + loopback sign-in as client `pepper-mac`, scope `videos`, same flow as Muesli; refresh/revoke), `OAuthLoopbackServer`, `OrbisClient` (REST; asks `OrbisAccount` for a credential per request), `OrbisExportController` (FinalRenderer → presigned R2 PUT → ingest-assets), `OrbisExportSheet`, `OrbisKeychain` (refresh token keyed per host, never UserDefaults), `OrbisSettings` (host + last-used form values). No custom URL scheme — an old token-delivery link was a token-injection hole |
+| `Pepper/UI/` | SwiftUI/AppKit windows (Settings, Soundboard, SourcePicker, RegionSelector, Countdown, RecordingBorder, WebcamPreview, Teleprompter); `Onboarding/` (setup walkthrough, modelled on Muesli's); `Brand` (SBS tokens shared with Muesli: colorsets, cobalt `AccentColor` app-wide, Nantes font in `Resources/Fonts`, Neon/Quiet button styles, `brandCard`/`brandKicker`/`brandTimecode`). The editor follows Muesli's rules: native toolbar/forms/menus/sheets; ground strips (timeline, inspector) carrying surface cards; one Neon CTA (Quick polish); Persimmon = live/playhead, Violet = automatic (zooms), Emerald = you (full-screen moments), Teal = caption blocks |
 | `Pepper/Hotkeys/` | `GlobalHotkey` — Carbon `RegisterEventHotKey` wrapper |
 | `Pepper/Settings/` | `Settings` — UserDefaults-backed singleton, posts `Settings.didChange` notification |
 
@@ -198,8 +178,19 @@ the same time base the editor uses for seeking. Don't mix wall-clock
   - Camera, Microphone — webcam + mic capture.
   - Screen Recording — `SCStream`.
   - Accessibility — `NSEvent.addGlobalMonitorForEvents` (clicks / keys
-    feed the event log and soundboard hotkeys). Triggered at launch via
-    `AXIsProcessTrustedWithOptions`.
+    feed the event log and soundboard hotkeys).
+- **Nothing prompts at launch.** The setup walkthrough (`Onboarding/`,
+  shown until `Settings.hasCompletedOnboarding`; Settings › Setup reopens
+  it) asks for each permission from a button. A camera/mic skipped there
+  is asked for when recording starts; a failed source list (Screen
+  Recording off, or on but not applied until relaunch) gets an alert with
+  Quit & Reopen.
+- **Review hooks (Debug builds, render then quit, work alongside a
+  running Pepper):** `open -n Pepper.app --args
+  -pepper.debug.renderOnboarding <dir>` writes every setup step (granted
+  and un-granted); `-pepper.debug.renderEditor <dir>
+  -pepper.debug.renderEditorBundle <recording.pepper>` writes the editor
+  window with each inspector row open. The video area renders black.
 
 **Keep signing identity stable across builds** — ad-hoc signing
 reshuffles the CDHash every compile and re-prompts for every TCC grant.
@@ -221,10 +212,10 @@ This is a menu-bar-only app by default (`LSUIElement: true`). That means:
   panels, NSColorPanel, NSFontPanel all need `NSApp.activate(ignoringOtherApps: true)`
   called before they're shown. See the `Check for Updates` menu-bar
   callback in `AppDelegate` for the pattern.
-- **Activation policy flips on editor open.** Opening a `.pepper`
-  bundle flips `NSApp.setActivationPolicy(.regular)` so the app appears
-  in the Dock and can accept window focus. Closing the last editor
-  flips it back to `.accessory`.
+- **Activation policy flips while a window needs focus.** Editors, the
+  open panel and the setup walkthrough each `DockPresence.claim` so the
+  app is `.regular` (Dock, key focus); it drops back to `.accessory` when
+  the last claim is released. Don't call `setActivationPolicy` directly.
 
 ## Concurrency
 
@@ -265,12 +256,6 @@ Same model as Muesli (`~/Muesli/scripts/release.sh`, docs/DEPLOYMENT.md §7).
 
 `dist/` is gitignored but must be kept between releases: generate_appcast
 reads the previous feed and old zips (for deltas) from it.
-
-**One-time bridge (first Orbis release only):** Mentor copies up to 1.1.1 poll
-`appcast.xml` on GitHub `main`. After `--verify` passes, copy the new
-release's `<item>` from `dist/appcast.xml` into that file (absolute
-sbsorbis.com zip URL, same signature and length), commit
-`appcast: bridge vX.Y.Z to Orbis`, push. Then delete this paragraph.
 
 ## Tuning notes / gotchas accumulated so far
 

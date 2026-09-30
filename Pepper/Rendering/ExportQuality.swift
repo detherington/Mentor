@@ -21,22 +21,22 @@ enum ExportQuality: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
-    /// Human-readable label for the inspector picker.
+    /// Label for the Export save panel's Quality menu.
     var label: String {
         switch self {
-        case .low:    return "Low (4 Mbps)"
-        case .medium: return "Medium (8 Mbps)"
-        case .high:   return "High (12 Mbps)"
+        case .low:    return "Smaller file"
+        case .medium: return "Standard"
+        case .high:   return "Best"
         }
     }
 
-    /// Short descriptor of expected file size per minute at 1080p60.
-    /// Rough heuristic — AAC audio adds ~1.5MB/min on top.
+    /// Expected file size per minute at 1080p60. Rough heuristic — AAC
+    /// audio adds ~1.5 MB/min on top.
     var sizeHint: String {
         switch self {
-        case .low:    return "≈ 30 MB/min"
-        case .medium: return "≈ 60 MB/min"
-        case .high:   return "≈ 90 MB/min"
+        case .low:    return "About 30 MB a minute"
+        case .medium: return "About 60 MB a minute"
+        case .high:   return "About 90 MB a minute"
         }
     }
 }

@@ -1,12 +1,10 @@
 # Pepper
 
-*Formerly Mentor (through 1.1.1). Existing installs update in place; see CLAUDE.md for the identifiers that keep the old name.*
-
 A Loom-style screen + webcam recording app for macOS, built to support guided software walkthroughs with smart zoom, webcam transitions, titles, and a presenter soundboard.
 
 ## What it does
 
-- Menu-bar capture: screen (display, window or region) + webcam + mic + system audio into a `.pepper` sidecar bundle (`.mentor` recordings from before the rename still open) (raw tracks + event logs). Pause/resume, configurable global shortcuts (default ⌘⇧R record, ⌘⇧P pause).
+- Menu-bar capture: screen (display, window or region) + webcam + mic + system audio into a `.pepper` sidecar bundle (raw tracks + event logs). Pause/resume, configurable global shortcuts (default ⌘⇧R record, ⌘⇧P pause).
 - Post-capture render → composited MP4 with webcam overlay, smart zoom, cursor ripples/highlight, keystroke overlays and captions.
 - Editor: live preview; trim + cuts, auto-trim silence; editable zoom + talking-head keyframes; webcam shape, position, transitions and background effects; title cards; audio mix + mic noise reduction; on-device transcription with editable captions (burned in or `.srt`); undo.
 - Teleprompter: floating script window that stays out of the capture.
@@ -38,8 +36,6 @@ Pepper ships the same way as Muesli: Orbis hosts the releases at `https://sbsorb
 | `Pepper-<version>.dmg` | the download page's button (the page swaps the zip's `.zip` for `.dmg`) |
 
 Build numbers are UTC timestamps (`YYYYMMDDHHMM`), set by the release script: Sparkle orders updates by them and the download page compares them as text.
-
-Mentor copies up to 1.1.1 still poll the legacy `appcast.xml` in this repo. The first Orbis release also gets a bridge item there, pointing at its zip on Orbis, so those copies update to Pepper and move to the new feed. Sparkle keeps the installed file name, so Pepper renames `Mentor.app` to `Pepper.app` once on first launch.
 
 ### First-time signing setup
 

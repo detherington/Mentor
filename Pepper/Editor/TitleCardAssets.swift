@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 /// Manages user-supplied title-card background images. Each image is
-/// copied into `~/Library/Application Support/Mentor/TitleCards/`
+/// copied into `~/Library/Application Support/Pepper/TitleCards/`
 /// under a UUID-based filename so the title card's JSON settings can
 /// reference it stably — renaming or deleting the user's original
 /// doesn't orphan the card's background.
@@ -17,10 +17,8 @@ enum TitleCardAssets {
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        // Still "Mentor" (the app's name before 2.0): saved title cards
-        // reference images here, so the folder didn't move with the rename.
         let dir = base
-            .appendingPathComponent("Mentor", isDirectory: true)
+            .appendingPathComponent("Pepper", isDirectory: true)
             .appendingPathComponent("TitleCards", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir

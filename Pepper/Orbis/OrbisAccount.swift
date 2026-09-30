@@ -4,15 +4,12 @@ import Foundation
 
 /// Pepper's connection to Orbis, for the host in `OrbisSettings`: "Sign
 /// In with Orbis", OAuth 2.1 authorization code + PKCE with a loopback
-/// redirect as public client `mentor-mac` (scope `videos`) — the flow
+/// redirect as public client `pepper-mac` (scope `videos`) — the flow
 /// Muesli uses against the same server.
 ///
 /// Pepper starts the sign-in and holds the verifier and `state`, so
-/// nothing arriving from outside can plant a credential. (1.1.x connected
-/// with personal access tokens delivered through a `mentor://orbis-token`
-/// link that any web page or app could fire, routing later uploads to
-/// another account; tokens are no longer accepted and are purged on
-/// upgrade.) The access token (≈1 h) lives in memory, the rotating
+/// nothing arriving from outside can plant a credential. The access
+/// token (≈1 h) lives in memory, the rotating
 /// refresh token in the Keychain per host (see `OrbisKeychain`), and
 /// sign-out revokes it on the server.
 ///
@@ -22,18 +19,14 @@ import Foundation
 final class OrbisAccount {
     static let shared = OrbisAccount()
 
-    /// Public OAuth client registered in Orbis for Pepper. It keeps the
-    /// app's pre-2.0 name: Orbis issued every existing sign-in to it.
-    static let clientID = "mentor-mac"
+    /// Public OAuth client registered in Orbis for Pepper.
+    static let clientID = "pepper-mac"
     /// Upload + manage the user's videos.
     static let scope = "videos"
 
     private(set) var isConnected = false
     private(set) var userName: String?
     private(set) var isSigningIn = false
-    /// An update removed this Mac's personal access token; Settings asks
-    /// the user to sign in once. Cleared by signing in.
-    private(set) var needsSignInAfterUpgrade = false
 
     @ObservationIgnored private var host: String
     @ObservationIgnored private var accessToken: String?
@@ -43,11 +36,6 @@ final class OrbisAccount {
 
     private init() {
         host = OrbisSettings.shared.host
-        if OrbisKeychain.purgePersonalTokens() {
-            OrbisSettings.shared.signInRequiredAfterUpgrade = true
-            PepperDebug.log("ORBIS: removed personal access token(s) from before sign-in")
-        }
-        OrbisSettings.shared.removeLegacyUserName()
         reload()
         NotificationCenter.default.addObserver(
             forName: OrbisSettings.didChange,
@@ -115,8 +103,6 @@ final class OrbisAccount {
         accessToken = response.access_token
         accessTokenExpiry = Date().addingTimeInterval(response.expires_in ?? 3600)
         isConnected = true
-        OrbisSettings.shared.signInRequiredAfterUpgrade = false
-        needsSignInAfterUpgrade = false
         setUserName(response.user ?? me)
         PepperDebug.log("ORBIS: signed in as \(userName ?? "?")")
     }
@@ -215,7 +201,6 @@ final class OrbisAccount {
     private func reload() {
         isConnected = OrbisKeychain.loadRefreshToken(host: host) != nil
         userName = isConnected ? OrbisSettings.shared.userName(forHost: host) : nil
-        needsSignInAfterUpgrade = !isConnected && OrbisSettings.shared.signInRequiredAfterUpgrade
     }
 
     private func forgetSession() {
@@ -239,7 +224,7 @@ final class OrbisAccount {
         let challenge = base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
         let state = randomURLSafe(bytes: 16)
 
-        let server = try OAuthLoopbackServer(successMessage: "Pepper is connected to Orbis.")
+        let server = try OAuthLoopbackServer()
         let port = try await server.start()
         defer { server.stop() }
         let redirectURI = "http://127.0.0.1:\(port)/callback"

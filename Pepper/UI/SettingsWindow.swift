@@ -162,6 +162,16 @@ private struct SettingsView: View {
                 }
             }
 
+            Section("Setup") {
+                HStack {
+                    Text("Walk through permissions and Orbis sign-in again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Show Setup Guide…") { OnboardingWindowController.shared.show(fromStart: true) }
+                }
+            }
+
             Section("Orbis") {
                 let account = OrbisAccount.shared
                 HStack {
@@ -190,11 +200,6 @@ private struct SettingsView: View {
                             .disabled(orbisTesting)
                     }
                 } else {
-                    if account.needsSignInAfterUpgrade {
-                        Text("Pepper now connects with your Orbis sign-in instead of an access token. Sign in once to keep exporting. Old Pepper tokens can be deleted from your Orbis settings.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
                     Button("Sign In with Orbis…") { signInToOrbis() }
                         .buttonStyle(.borderedProminent)
                 }

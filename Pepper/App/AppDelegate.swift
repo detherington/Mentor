@@ -74,6 +74,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        // Render-and-quit review mode; runs before the single-instance
+        // check so it works while another Pepper is open.
+        if OnboardingWindowController.renderStepsIfRequested() { exit(0) }
+        if EditorWindowController.renderIfRequested() { exit(0) }
+        #endif
         // Drain any queued Apple Events (specifically `kAEOpenDocuments`)
         // before the duplicate-instance check. When Finder double-clicks a
         // .pepper file, macOS launches us with the file to open — but the
@@ -87,9 +93,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         PepperDebug.reset()
         PepperDebug.log("APP: applicationDidFinishLaunching")
-        // Copies updated from Mentor 1.x still live in Mentor.app. Before
-        // anything (Sparkle included) captures the bundle path.
-        if LegacyAppName.moveAndRelaunchIfNeeded(opening: urlRouter.pendingFileURLs) { return }
         coordinator = CaptureCoordinator()
         menuBar = MenuBarController()
         hotkey = GlobalHotkey()
@@ -171,11 +174,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         devices.startMonitoring()
-        Task { @MainActor in
-            await self.devices.startSessionWithPermissions()
-            self.refreshWebcamPreview()
-            self.refreshTeleprompter()
-            self.devices.promptForAccessibility()
+        devices.startSessionIfAuthorized()
+        refreshWebcamPreview()
+        refreshTeleprompter()
+        // Setup asks for camera and mic from its buttons; bring the
+        // session up as soon as either is granted.
+        Permissions.shared.onCaptureAccessChanged = { [weak self] in
+            self?.devices.startSessionIfAuthorized()
+            self?.refreshWebcamPreview()
+        }
+        if !Settings.shared.hasCompletedOnboarding {
+            OnboardingWindowController.shared.show()
         }
 
         // Ready: open anything Finder handed us during launch.

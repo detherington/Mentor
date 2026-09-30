@@ -14,9 +14,6 @@ final class OpenURLRouter: NSObject {
 
     private var pending: [URL] = []
 
-    /// Files queued by Finder that haven't been opened yet.
-    var pendingFileURLs: [URL] { pending.filter(\.isFileURL) }
-
     /// Listen for the raw `kAEOpenDocuments` Apple Event in addition to
     /// `application(_:open:)`. On LSUIElement apps the high-level delegate
     /// method sometimes doesn't fire before the runloop reaches
@@ -69,12 +66,11 @@ final class OpenURLRouter: NSObject {
         receive(urls)
     }
 
-    /// Only `.pepper` bundles (file URLs) are opened. The
-    /// `mentor://orbis-token` link that used to connect Orbis is gone — it
-    /// accepted a token from any page or app without Pepper having asked,
-    /// which let a malicious link route later uploads to someone else's
-    /// Orbis account. The URL scheme is no longer registered; this guard
-    /// only catches a stale LaunchServices registration.
+    /// Only `.pepper` bundles (file URLs) are opened. The app registers
+    /// no URL scheme: an old token-delivery link accepted a credential
+    /// from any page or app without being asked, which let a malicious
+    /// link route uploads to someone else's Orbis account. This guard only
+    /// catches a stale LaunchServices registration.
     private func drain() {
         guard let open, !pending.isEmpty else { return }
         let urls = pending
