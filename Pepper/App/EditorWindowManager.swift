@@ -19,6 +19,11 @@ final class EditorWindowManager {
         windows.filter { $0.viewModel.hasActiveExport }
     }
 
+    /// An editor has this recording open.
+    func isOpen(_ url: URL) -> Bool {
+        windows.contains { $0.project.bundleURL.standardizedFileURL == url.standardizedFileURL }
+    }
+
     /// Editors left open at quit never get `windowWillClose`.
     func flushPendingSaves() {
         for editor in windows { editor.viewModel.flushPendingSaves() }
@@ -31,7 +36,7 @@ final class EditorWindowManager {
         }
 
         // If already open, bring that window to front instead of duplicating.
-        if let existing = windows.first(where: { $0.project.bundleURL == url }) {
+        if let existing = windows.first(where: { $0.project.bundleURL.standardizedFileURL == url.standardizedFileURL }) {
             existing.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -41,7 +46,7 @@ final class EditorWindowManager {
             let project = try RecordingProject.load(bundleURL: url)
             // Editors are windowed — the app needs the Dock and focus
             // while one is open.
-            let controller = EditorWindowController(project: project)
+            let controller = EditorWindowController(project: project, cascadingFrom: windows.last?.window)
             DockPresence.claim(controller)
             controller.onClose = { [weak self, weak controller] in
                 guard let self, let controller else { return }

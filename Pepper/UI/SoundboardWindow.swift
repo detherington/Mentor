@@ -15,6 +15,8 @@ final class SoundboardWindowController {
     }
 
     func show() {
+        // Hotkeys only work while this window is open or a recording runs.
+        controller.setWindowOpen(true)
         if let window {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
@@ -29,6 +31,7 @@ final class SoundboardWindowController {
         win.title = "Soundboard"
         win.contentView = NSHostingView(rootView: SoundboardView(controller: controller))
         win.center()
+        win.setFrameAutosaveName("PepperSoundboard")
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 460, height: 320)
         // Hotkey capture swallows keystrokes app-wide until a combo is
@@ -38,7 +41,10 @@ final class SoundboardWindowController {
             object: win,
             queue: .main
         ) { [controller] _ in
-            Task { @MainActor in controller.cancelCapturingHotkey() }
+            Task { @MainActor in
+                controller.cancelCapturingHotkey()
+                controller.setWindowOpen(false)
+            }
         }
         self.window = win
         NSApp.activate(ignoringOtherApps: true)

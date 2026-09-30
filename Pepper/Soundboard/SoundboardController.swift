@@ -10,8 +10,11 @@ import Foundation
 ///   * `init`: load persisted cues from Settings. Don't start the engine
 ///     yet — many users won't touch the soundboard at all, and the
 ///     engine allocates audio hardware.
-///   * First cue added OR first recording: `start()` → engine running,
-///     hotkey monitors installed.
+///   * First cue added OR first recording: `start()` → engine running.
+///   * Hotkey monitors run only while a hotkey can matter: during a
+///     recording, or while the Soundboard window is open (trying cues,
+///     setting hotkeys). They used to run from launch whenever a cue
+///     existed, so Pepper saw every key press all day.
 ///   * `startRecordingTap(outputURL:)` / `stopRecordingTap()`: bridge
 ///     capture lifecycle so the mixer's output lands in
 ///     `soundboard.m4a` inside the sidecar bundle.
@@ -35,9 +38,13 @@ final class SoundboardController {
     /// allowed to overlap freely (rapid-fire stings are a feature).
     private(set) var testPlayingCueIDs: Set<UUID> = []
 
-    // Retained monitor handles so we can remove them when cues change.
+    // Retained monitor handles so we can remove them when they're not needed.
     @ObservationIgnored private var globalMonitor: Any?
     @ObservationIgnored private var localMonitor: Any?
+    /// A recording is running (whether or not it has cues yet).
+    @ObservationIgnored private var inRecording = false
+    /// The Soundboard window is open.
+    @ObservationIgnored private var windowOpen = false
 
     /// Handle for each cue's active *test* playback. Used to cancel
     /// when the user re-taps the button. Hotkey-triggered plays never
@@ -80,6 +87,7 @@ final class SoundboardController {
         cues.append(cue)
         persist()
         ensureEngineRunning()
+        updateMonitors()
     }
 
     func updateCue(_ cue: SoundCue) {
@@ -109,7 +117,28 @@ final class SoundboardController {
             PepperDebug.log("SOUNDBOARD: engine start failed: \(error)")
             return
         }
-        installMonitorsIfNeeded()
+    }
+
+    /// The Soundboard window opened or closed.
+    func setWindowOpen(_ open: Bool) {
+        windowOpen = open
+        updateMonitors()
+    }
+
+    private func updateMonitors() {
+        let needed = windowOpen || capturingHotkeyForCueID != nil || (inRecording && !cues.isEmpty)
+        if needed {
+            installMonitorsIfNeeded()
+        } else {
+            removeMonitors()
+        }
+    }
+
+    private func removeMonitors() {
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        globalMonitor = nil
+        localMonitor = nil
     }
 
     private func installMonitorsIfNeeded() {
@@ -179,11 +208,12 @@ final class SoundboardController {
         capturingHotkeyForCueID = cueID
         // Ensure our monitors are live — even with zero cues we need the
         // capture monitor active or the UI would hang on "Press keys…".
-        installMonitorsIfNeeded()
+        updateMonitors()
     }
 
     func cancelCapturingHotkey() {
         capturingHotkeyForCueID = nil
+        updateMonitors()
     }
 
     /// Clear the hotkey binding from a cue (but keep the cue itself).
@@ -220,7 +250,6 @@ final class SoundboardController {
                 PepperDebug.log("SOUNDBOARD: engine start (test) failed: \(error)")
                 return
             }
-            installMonitorsIfNeeded()
         }
 
         let cueID = cue.id
@@ -241,6 +270,8 @@ final class SoundboardController {
     /// the file, and `EditorComposition` will skip the missing track).
     /// `eventLogURL` is where the cue-fire log will be written at stop.
     func startRecordingTap(outputURL: URL, eventLogURL: URL? = nil) {
+        inRecording = true
+        updateMonitors()
         guard !cues.isEmpty else { return }
         do {
             try engine.startRecordingTap(outputURL: outputURL)
@@ -272,6 +303,8 @@ final class SoundboardController {
     /// `systemUptime` seconds). Cue times and the audio are both rebased
     /// to it — the tap starts before screen capture is up.
     func stopRecordingTap(timeOriginUptime origin: TimeInterval? = nil) async {
+        inRecording = false
+        updateMonitors()
         recordingActive = false
         engine.speakerOutputMuted = false
         if let origin {

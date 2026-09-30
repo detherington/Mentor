@@ -1,14 +1,16 @@
 import AppKit
 
-/// Standard-shape main menu: App, Edit, Window. An LSUIElement app gets
-/// none automatically, so without it ⌘Q, ⌘W, ⌘H, Cut/Copy/Paste and the
-/// standard About / Hide / Show All commands have nothing to route through
-/// when an editor window is key. The menu shows at the top of the screen
-/// whenever one of our windows is focused.
+/// Standard-shape main menu: App, File, Edit, Window. An LSUIElement app
+/// gets none automatically, so without it ⌘Q, ⌘W, ⌘H, Cut/Copy/Paste and
+/// the standard About / Hide / Show All commands have nothing to route
+/// through when an editor window is key. The menu shows at the top of the
+/// screen whenever one of our windows is focused.
 ///
-/// `Edit` deliberately omits Undo/Redo — those are handled inside the
-/// editor view via `.onKeyPress` so they're scoped to the editor's
-/// UndoManager without fighting text-field native undo.
+/// Settings (⌘,) and Open Recording (⌘O) go to `AppDelegate`; Undo and
+/// Redo to the key editor (`EditorWindowController`), with `AppDelegate`
+/// disabling them when no editor is key. They use their own actions, not
+/// `undo:`/`redo:`, so they drive the editor's undo stack rather than a
+/// focused text field's.
 @MainActor
 enum MainMenu {
     static func build() -> NSMenu {
@@ -24,6 +26,10 @@ enum MainMenu {
         appMenu.addItem(withTitle: "About Pepper",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Settings…",
+                        action: #selector(AppDelegate.showSettingsWindow(_:)),
+                        keyEquivalent: ",")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Pepper",
                         action: #selector(NSApplication.hide(_:)),
@@ -41,6 +47,14 @@ enum MainMenu {
                         action: #selector(NSApplication.terminate(_:)),
                         keyEquivalent: "q")
 
+        let fileItem = NSMenuItem()
+        main.addItem(fileItem)
+        let fileMenu = NSMenu(title: "File")
+        fileItem.submenu = fileMenu
+        fileMenu.addItem(withTitle: "Open Recording…",
+                         action: #selector(AppDelegate.showOpenRecordingPanel(_:)),
+                         keyEquivalent: "o")
+
         // Edit menu — text-field clipboard actions via the responder
         // chain (NSText handles these natively for any focused NSTextView
         // / NSTextField, which is what SwiftUI TextFields wrap).
@@ -48,6 +62,15 @@ enum MainMenu {
         main.addItem(editItem)
         let editMenu = NSMenu(title: "Edit")
         editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Undo",
+                         action: #selector(EditorWindowController.undoEditorChange(_:)),
+                         keyEquivalent: "z")
+        let redo = NSMenuItem(title: "Redo",
+                              action: #selector(EditorWindowController.redoEditorChange(_:)),
+                              keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Cut",
                          action: #selector(NSText.cut(_:)),
                          keyEquivalent: "x")

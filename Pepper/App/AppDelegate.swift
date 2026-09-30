@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // check so it works while another Pepper is open.
         if OnboardingWindowController.renderStepsIfRequested() { exit(0) }
         if EditorWindowController.renderIfRequested() { exit(0) }
+        if VideoReadyNotice.renderIfRequested() { exit(0) }
         #endif
         // Drain any queued Apple Events (specifically `kAEOpenDocuments`)
         // before the duplicate-instance check. When Finder double-clicks a
@@ -114,6 +115,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recording.onStateChange = { [weak self] state in self?.recordingStateChanged(state) }
         recording.onRecordingStarted = { [weak self] in self?.attachTeleprompterMicTap() }
         recording.onRecordingWillStop = { [weak self] in self?.coordinator.micSampleSink = nil }
+        recording.onRecordingSaved = { [weak self] bundle in self?.editors.open(bundle) }
+        recording.onVideoRendered = { [weak self] video, bundle in
+            guard let self else { return }
+            // In the editor, Export is how to get the edited video; a
+            // card about the as-recorded copy would muddle the two.
+            guard !self.editors.isOpen(bundle) else { return }
+            VideoReadyNotice.shared.show(video: video) { [weak self] in self?.editors.open(bundle) }
+        }
 
         editors = EditorWindowManager(showError: { [weak self] in self?.menuBar.flashError(message: $0) })
 
@@ -436,11 +445,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.setWebcamPreviewShown(webcamPreview != nil)
     }
 
+    // MARK: - Main menu actions
+
+    @objc func showSettingsWindow(_ sender: Any?) { settingsController.show() }
+    @objc func showOpenRecordingPanel(_ sender: Any?) { editors.showOpenPanel() }
+
+    // Reached only when no editor is key (the key editor handles these
+    // first): disable Undo and Redo and drop the last editor's action
+    // name from their titles.
+    @objc func undoEditorChange(_ sender: Any?) {}
+    @objc func redoEditorChange(_ sender: Any?) {}
+
     // MARK: - Misc
 
     private func revealOutput() {
         let dir = CaptureCoordinator.outputDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dir)
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(undoEditorChange(_:)):
+            item.title = "Undo"
+            return false
+        case #selector(redoEditorChange(_:)):
+            item.title = "Redo"
+            return false
+        default:
+            return true
+        }
     }
 }

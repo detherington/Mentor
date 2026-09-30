@@ -22,6 +22,11 @@ final class RecordingFlowController {
     /// The app wires the teleprompter's follow-voice mic tap to these.
     var onRecordingStarted: (() -> Void)?
     var onRecordingWillStop: (() -> Void)?
+    /// The recording's bundle is complete (writers finalized); the app
+    /// opens it in the editor.
+    var onRecordingSaved: ((URL) -> Void)?
+    /// The as-recorded MP4 finished rendering: (video, recording bundle).
+    var onVideoRendered: ((URL, URL) -> Void)?
 
     private let coordinator: CaptureCoordinator
     private let menuBar: MenuBarController
@@ -284,11 +289,12 @@ final class RecordingFlowController {
             self.menuBar.setRecording(false)
             self.hideRecordingBorder()
             guard let finished else { return }
-            // Reveal the bundle immediately so the user sees where the
-            // recording was saved — the composited MP4 will appear
-            // alongside it when the post-capture render finishes.
-            NSWorkspace.shared.activateFileViewerSelecting([finished.bundle.sidecarURL])
             guard renderAfterStop, !Task.isCancelled else { return }
+            // Straight into the editor: polishing and exporting is the
+            // next step. This used to reveal the bundle in Finder, which
+            // showed a folder of raw tracks while the video was still
+            // minutes from existing.
+            self.onRecordingSaved?(finished.bundle.sidecarURL)
             self.menuBar.setFinalizing(true)
             // Render the composited MP4 post-capture. The heavy lifting
             // runs on the renderer's own queues, so awaiting it here
@@ -300,6 +306,7 @@ final class RecordingFlowController {
                 )
                 PepperDebug.log("APP: final render complete → \(finalURL.lastPathComponent)")
                 self.menuBar.setFinalizing(false)
+                self.onVideoRendered?(finalURL, finished.bundle.sidecarURL)
             } catch FinalRenderer.RenderError.cancelled {
                 // Quit cancelled it — no alert; the bundle is intact.
                 PepperDebug.log("APP: final render cancelled")

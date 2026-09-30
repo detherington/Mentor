@@ -43,6 +43,11 @@ final class EditorViewModel {
     /// every inspector render (a file-exists check and an event-log scan).
     let hasSoundboardTrack: Bool
     let loggedClickCount: Int
+    /// When the user clicked, typed or switched apps (seconds, the
+    /// composition's time base). A quiet stretch around these is the
+    /// user showing something, not dead air, so auto-trim and "Cut long
+    /// pauses" leave it in.
+    let activityTimes: [TimeInterval]
     @ObservationIgnored private let sidecars = SidecarStore()
     /// Cuts the playback boundary observers were last installed for.
     @ObservationIgnored private var observedCutRanges: [CMTimeRange]?
@@ -426,6 +431,14 @@ final class EditorViewModel {
         if case .noSpeechDetected = err { return true }
         return false
     }
+
+    /// True iff the last failure was Speech Recognition being off for
+    /// Pepper, so the inspector can offer the System Settings pane.
+    var transcriptionErrorIsPermissionDenied: Bool {
+        guard let err = transcriptionError as? CaptionTranscriber.TranscriberError else { return false }
+        if case .notAuthorized = err { return true }
+        return false
+    }
     /// Persisted styling for the caption strip. Default is enabled so a
     /// freshly-generated transcription shows immediately.
     var captionStyle: CaptionStyle {
@@ -644,6 +657,9 @@ final class EditorViewModel {
         self.hasSoundboardTrack = project.soundboardLog != nil
             || FileManager.default.fileExists(atPath: project.bundle.soundboardAudioURL.path)
         self.loggedClickCount = project.eventLog?.events.filter { $0.type == "click" }.count ?? 0
+        self.activityTimes = project.eventLog?.events
+            .filter { ["click", "key", "appActivate"].contains($0.type) }
+            .map(\.t) ?? []
         let captured = project.metadata.webcamLayout
         let scale = CGFloat(project.metadata.backingScale ?? 2.0)
         self.webcamPosition = saved.flatMap { WebcamPosition(rawValue: $0.webcamPosition) }
@@ -859,10 +875,11 @@ final class EditorViewModel {
                 // TrimMap re-normalises (sorted, merged, inside the trim).
                 self.cutRanges = TrimMap(outerTrim: trimRange, cuts: restoredCuts).cuts
                 PepperDebug.log("EDITOR: restored edit state trim \(CMTimeGetSeconds(self.trimStart))..\(CMTimeGetSeconds(self.trimEnd))s, \(self.cutRanges.count) cut(s)")
-            } else if let detected = await SilenceAnalyzer.detectContentRange(
+            } else if let speech = await SilenceAnalyzer.detectContentRange(
                 audioURL: project.bundle.micAudioURL,
                 duration: result.duration
             ) {
+                let detected = SilenceAnalyzer.widening(speech, toKeep: activityTimes, duration: result.duration)
                 self.trimStart = detected.start
                 self.trimEnd   = detected.end
                 PepperDebug.log("EDITOR: auto-trim \(CMTimeGetSeconds(detected.start))..\(CMTimeGetSeconds(detected.end))s")
@@ -1323,13 +1340,16 @@ final class EditorViewModel {
     /// Scan the mic track for interior silences ≥ ~0.8s and insert them
     /// all as a single undoable batch. Existing cuts are preserved —
     /// silences are merged into the existing list via `TrimMap`'s
-    /// normaliser, so re-running is idempotent.
+    /// normaliser, so re-running is idempotent. Quiet stretches where
+    /// the user clicks or types are kept: in a walkthrough that's the
+    /// demo, and cutting it took the clicks (and their zooms) with it.
     func autoCutSilences() {
         guard !isAutoCutting else { return }
         isAutoCutting = true
         let audioURL = project.bundle.micAudioURL
         let dur = duration
         let outerTrim = trimRange
+        let activity = activityTimes
         Task { [weak self] in
             let scan = await SilenceAnalyzer.scan(audioURL: audioURL, duration: dur)
             await MainActor.run {
@@ -1342,10 +1362,11 @@ final class EditorViewModel {
                 // Only consider silences strictly inside the user's
                 // current outer trim — detections outside are either
                 // already covered by the outer trim or irrelevant.
-                let candidates = scan.interiorSilences.filter { sil in
+                let silences = scan.interiorSilences.filter { sil in
                     CMTimeCompare(sil.start, outerTrim.start) >= 0 &&
                     CMTimeCompare(sil.end,   outerTrim.end)   <= 0
                 }
+                let candidates = SilenceAnalyzer.sparing(silences, activity: activity)
                 // Merge with existing cuts via the TrimMap normaliser
                 // (sorts, clamps, merges overlaps). Skip the operation
                 // if nothing new would be added.
@@ -1378,11 +1399,13 @@ final class EditorViewModel {
     func autoTrimSilence() {
         let audioURL = project.bundle.micAudioURL
         let dur = duration
+        let activity = activityTimes
         Task { [weak self] in
-            guard let detected = await SilenceAnalyzer.detectContentRange(
+            guard let speech = await SilenceAnalyzer.detectContentRange(
                 audioURL: audioURL,
                 duration: dur
             ) else { return }
+            let detected = SilenceAnalyzer.widening(speech, toKeep: activity, duration: dur)
             await MainActor.run {
                 guard let self else { return }
                 let oldStart = self.trimStart
@@ -1416,7 +1439,16 @@ final class EditorViewModel {
     /// placeholder results from the on-device URL-request path even
     /// when Dictation works locally. Cloud mode sends audio to Apple
     /// for that single request only; the user opts in via the UI.
-    func generateCaptions(allowCloudFallback: Bool = false) {
+    ///
+    /// `mayAskForPermission` only matters where captions need Speech
+    /// Recognition (macOS 14/15): pass true from a button whose note
+    /// says macOS will ask (`CaptionTranscriber.willAskForPermission`).
+    /// `finish` gets the line count or the error, on the main actor.
+    func generateCaptions(
+        allowCloudFallback: Bool = false,
+        mayAskForPermission: Bool = false,
+        then finish: ((Result<Int, Error>) -> Void)? = nil
+    ) {
         guard !isTranscribing else { return }
         isTranscribing = true
         transcriptionError = nil
@@ -1425,7 +1457,8 @@ final class EditorViewModel {
             do {
                 let log = try await CaptionTranscriber.transcribe(
                     audioURL: audioURL,
-                    allowCloudFallback: allowCloudFallback
+                    allowCloudFallback: allowCloudFallback,
+                    mayAskForPermission: mayAskForPermission
                 )
                 await MainActor.run {
                     guard let self else { return }
@@ -1433,6 +1466,7 @@ final class EditorViewModel {
                     self.isTranscribing = false
                     self.saveNow(.transcription)
                     self.applyLayout()
+                    finish?(.success(log.lines.count))
                 }
             } catch {
                 await MainActor.run {
@@ -1440,6 +1474,7 @@ final class EditorViewModel {
                     self.isTranscribing = false
                     self.transcriptionError = error
                     PepperDebug.log("CAPTIONS: generate failed: \(error.localizedDescription)")
+                    finish?(.failure(error))
                 }
             }
         }
@@ -1797,27 +1832,93 @@ final class EditorViewModel {
                         actionName: "Change Full-Screen Size", coalesceKey: "thSizeAll")
     }
 
-    /// True while "Polish my video" still has work running.
-    var isPolishing: Bool { isTranscribing || isAutoCutting }
+    /// One line of the Quick polish card's report.
+    struct PolishStep: Equatable {
+        enum Kind { case working, done, nothing, problem }
+        var kind: Kind
+        var text: String
+    }
 
-    /// Inspector "Polish my video": what most walkthroughs want — zooms
-    /// on the clicks, captions, long pauses cut. Each part is its own
-    /// undo step, and running it again is safe: auto-cut merges with
-    /// existing cuts and captions are only written once.
+    /// What the last "Polish my video" did. Worded in the past tense so
+    /// it stays true after later edits. Nil until it runs, or once the
+    /// user closes it.
+    struct PolishReport: Equatable {
+        var zooms: PolishStep
+        var captions: PolishStep
+        var isWorking: Bool { zooms.kind == .working || captions.kind == .working }
+    }
+
+    private(set) var polishReport: PolishReport?
+
+    /// True while "Polish my video" still has work running.
+    var isPolishing: Bool { polishReport?.isWorking ?? false }
+
+    /// Polish can't start while captions are already being written.
+    var canPolish: Bool { !isTranscribing && !isLoading && loadError == nil }
+
+    func dismissPolishReport() {
+        polishReport = nil
+    }
+
+    /// Inspector "Polish my video": zooms on the clicks and captions,
+    /// the two things most walkthroughs want. Cutting pauses is left to
+    /// the Cuts row: it removes footage, which one button shouldn't do
+    /// unasked. Each part is its own undo step, running it again keeps
+    /// what's there, and the card reports what happened, including
+    /// when there was nothing to do (a short clip with no clicks or
+    /// speech used to look like a dead button).
     func quickPolish() {
+        guard canPolish else { return }
+        let zoomWasOn = zoomEnabled
         zoomEnabled = true
-        if zoomKeyframes.isEmpty, loggedClickCount > 0 {
+        let zooms: PolishStep
+        if !zoomKeyframes.isEmpty {
+            // Usually the case: zooms are made when the recording opens.
+            zooms = zoomWasOn
+                ? PolishStep(kind: .done, text: "\(Self.count(zoomKeyframes.count, "zoom")) already follow your clicks")
+                : PolishStep(kind: .done, text: "Turned on \(Self.count(zoomKeyframes.count, "zoom")) on your clicks")
+        } else if loggedClickCount == 0 {
+            zooms = PolishStep(kind: .nothing, text: "No clicks to zoom into")
+        } else {
             regenerateZoomFromClicks()
+            zooms = zoomKeyframes.isEmpty
+                ? PolishStep(kind: .nothing, text: "No clicks inside the recorded area")
+                : PolishStep(kind: .done, text: "Added \(Self.count(zoomKeyframes.count, "zoom")) on your clicks")
         }
-        if transcription == nil {
-            generateCaptions()
-        }
-        if !captionStyle.enabled {
+
+        let captionsWereOn = captionStyle.enabled
+        if !captionsWereOn {
             var style = captionStyle
             style.enabled = true
             captionStyle = style
         }
-        autoCutSilences()
+        guard transcription == nil else {
+            let text = captionsWereOn ? "Captions were already on" : "Turned your captions back on"
+            polishReport = PolishReport(zooms: zooms, captions: PolishStep(kind: .done, text: text))
+            return
+        }
+        polishReport = PolishReport(zooms: zooms, captions: PolishStep(kind: .working, text: "Writing captions…"))
+        // The card says so beforehand when macOS will ask for Speech
+        // Recognition, so the prompt isn't a surprise.
+        generateCaptions(mayAskForPermission: true) { [weak self] result in
+            guard let self else { return }
+            let step: PolishStep
+            switch result {
+            case .success(let lines):
+                step = PolishStep(kind: .done, text: "Wrote \(Self.count(lines, "caption line"))")
+            case .failure(CaptionTranscriber.TranscriberError.noSpeechDetected):
+                step = PolishStep(kind: .nothing, text: "No speech to caption")
+            case .failure:
+                step = PolishStep(kind: .problem, text: "Couldn't write captions")
+                // The Captions row says why and what to do.
+                self.openInspectorFeature = .captions
+            }
+            self.polishReport?.captions = step
+        }
+    }
+
+    private static func count(_ n: Int, _ noun: String) -> String {
+        "\(n) \(noun)\(n == 1 ? "" : "s")"
     }
 
     /// Move a zoom keyframe so it starts at `newStart`, keeping its length

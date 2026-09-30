@@ -231,6 +231,51 @@ enum SilenceAnalyzer {
         return Scan(contentRange: contentRange, interiorSilences: interiorSilences)
     }
 
+    // MARK: - On-screen activity
+
+    /// Kept around each click or key press: a moment before (the cursor
+    /// arriving) and a little longer after (the screen reacting — a page
+    /// loading, a menu opening).
+    static let activityLeadSeconds: Double = 1.0
+    static let activityTrailSeconds: Double = 3.0
+
+    /// `silences` with the stretches around `activity` taken out. Silence
+    /// on the mic isn't dead air when the user is clicking or typing, so
+    /// only what's left, if still long enough to be worth a cut, is
+    /// proposed.
+    static func sparing(_ silences: [CMTimeRange], activity: [TimeInterval], minCutSeconds: Double = 0.5) -> [CMTimeRange] {
+        guard !activity.isEmpty else { return silences }
+        let keep = activity.sorted().map { ($0 - activityLeadSeconds, $0 + activityTrailSeconds) }
+        var pieces: [CMTimeRange] = []
+        for silence in silences {
+            var start = CMTimeGetSeconds(silence.start)
+            let end = CMTimeGetSeconds(silence.end)
+            for (keepStart, keepEnd) in keep where keepEnd > start && keepStart < end {
+                if keepStart - start >= minCutSeconds {
+                    pieces.append(CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600),
+                                              end: CMTime(seconds: keepStart, preferredTimescale: 600)))
+                }
+                start = max(start, keepEnd)
+            }
+            if end - start >= minCutSeconds {
+                pieces.append(CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600),
+                                          end: CMTime(seconds: end, preferredTimescale: 600)))
+            }
+        }
+        return pieces
+    }
+
+    /// `content` stretched to keep the first and last clicks or key
+    /// presses, so a demo that starts or ends quietly isn't trimmed off.
+    static func widening(_ content: CMTimeRange, toKeep activity: [TimeInterval], duration: CMTime) -> CMTimeRange {
+        guard let first = activity.min(), let last = activity.max() else { return content }
+        let total = CMTimeGetSeconds(duration)
+        let start = max(0, min(CMTimeGetSeconds(content.start), first - activityLeadSeconds))
+        let end = min(total, max(CMTimeGetSeconds(content.end), last + activityTrailSeconds))
+        return CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600),
+                           end: CMTime(seconds: end, preferredTimescale: 600))
+    }
+
     /// RMS across all channels of a PCM buffer. Handles float32,
     /// int16, and int32 backing stores — AVAudioFile's processing
     /// format for a decoded AAC is usually float32 but we cover the

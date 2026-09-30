@@ -187,7 +187,12 @@ private struct QuickPolishCard: View {
                     .foregroundStyle(Brand.violet)
                 Text("Quick polish").brandDisplay(14)
             }
-            Note("Zoom into your clicks, add captions and cut long pauses, all in one go. You can fine-tune anything below.")
+            Note("Zoom into your clicks and add captions, in one go. You can fine-tune anything below.")
+            // Said before the click, never sprung after it (macOS 14 and
+            // 15 only; newer Macs write captions without asking).
+            if vm.transcription == nil, CaptionTranscriber.willAskForPermission {
+                Note("For the captions, macOS will ask to let Pepper use Speech Recognition. Your audio stays on this Mac.")
+            }
             // The panel's one Neon call to action.
             Button {
                 vm.quickPolish()
@@ -200,10 +205,82 @@ private struct QuickPolishCard: View {
                 }
             }
             .buttonStyle(NeonButtonStyle(height: 34, fullWidth: true))
-            .disabled(vm.isPolishing || vm.isLoading || vm.loadError != nil)
+            .disabled(!vm.canPolish)
+
+            if let report = vm.polishReport {
+                PolishReportView(vm: vm, report: report)
+            }
         }
         .padding(14)
         .brandCard()
+    }
+}
+
+/// What the last polish did, one line per part. Each line opens its row
+/// below, where the part can be adjusted or, if it failed, fixed.
+private struct PolishReportView: View {
+    let vm: EditorViewModel
+    let report: EditorViewModel.PolishReport
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
+                line(report.zooms, opens: .zoom, title: "Smart zoom")
+                line(report.captions, opens: .captions, title: "Captions")
+            }
+            Spacer(minLength: 0)
+            if !report.isWorking {
+                Button {
+                    vm.dismissPolishReport()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Hide what Quick polish did")
+            }
+        }
+        .padding(10)
+        .background(Brand.chip, in: RoundedRectangle(cornerRadius: Brand.Radius.chip, style: .continuous))
+    }
+
+    private func line(_ step: EditorViewModel.PolishStep, opens feature: InspectorFeature, title: String) -> some View {
+        Button {
+            vm.openInspectorFeature = feature
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                icon(step.kind)
+                    .frame(width: 14)
+                Text(step.text)
+                    .font(.system(size: 12))
+                    .foregroundStyle(step.kind == .nothing ? .secondary : .primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show \(title)")
+    }
+
+    @ViewBuilder
+    private func icon(_ kind: EditorViewModel.PolishStep.Kind) -> some View {
+        switch kind {
+        case .working:
+            ProgressView().controlSize(.mini)
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Brand.emerald)
+        case .nothing:
+            Image(systemName: "minus.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        case .problem:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+        }
     }
 }
 

@@ -152,7 +152,7 @@ final class SourcePickerWindow: NSObject, NSWindowDelegate {
         cb?()
     }
 
-    private static func screen(for display: SCDisplay) -> NSScreen? {
+    static func screen(for display: SCDisplay) -> NSScreen? {
         let key = NSDeviceDescriptionKey("NSScreenNumber")
         return NSScreen.screens.first { screen in
             (screen.deviceDescription[key] as? NSNumber)?.uint32Value == display.displayID
@@ -201,7 +201,7 @@ private struct SourcePickerView: View {
                     if tab == .display {
                         ForEach(displays, id: \.displayID) { display in
                             SourceCard(
-                                title: "Display \(display.displayID)",
+                                title: name(of: display),
                                 subtitle: "\(display.width) × \(display.height)",
                                 systemImage: "display"
                             ) { onPick(.display(display)) }
@@ -233,6 +233,20 @@ private struct SourcePickerView: View {
             .padding()
         }
         .frame(width: 760, height: 520)
+    }
+
+    /// The name macOS gives the screen ("Built-in Retina Display",
+    /// "LG UltraFine"), numbered when two are the same model. It was
+    /// "Display 2", the raw display ID, which meant nothing to anyone.
+    private func name(of display: SCDisplay) -> String {
+        guard let name = SourcePickerWindow.screen(for: display)?.localizedName else {
+            return "Display \(display.displayID)"
+        }
+        let twins = displays.filter { SourcePickerWindow.screen(for: $0)?.localizedName == name }
+        guard twins.count > 1, let index = twins.firstIndex(where: { $0.displayID == display.displayID }) else {
+            return name
+        }
+        return "\(name) \(index + 1)"
     }
 }
 

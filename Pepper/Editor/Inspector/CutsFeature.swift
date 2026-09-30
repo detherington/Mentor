@@ -16,7 +16,7 @@ struct CutsFeature: View {
     }
 
     var body: some View {
-        Note("Take out long pauses automatically, or cut any part yourself.")
+        Note("Take out long pauses automatically, or cut any part yourself. Pauses where you're clicking or typing stay in.")
 
         Button {
             vm.autoCutSilences()

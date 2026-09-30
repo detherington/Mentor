@@ -8,11 +8,17 @@ import Speech
 ///     `Speech.SpeechTranscriber` module. This is the path Apple
 ///     actively maintains and the one Dictation itself uses
 ///     on-device. `AssetInventory` is asked to install the model for
-///     the requested locale before analysis if it isn't already.
+///     the requested locale before analysis if it isn't already. It
+///     needs no Speech Recognition permission (checked on macOS 27:
+///     it transcribes with the status still "not determined"), so on
+///     these Macs captions never raise a system prompt. When it is
+///     available it is the only path: the legacy one below returns
+///     empty results on 26+ and then blames Siri and Dictation.
 ///  2. **Legacy `SFSpeechRecognizer`** with `requiresOnDeviceRecognition`
-///     = `true`. This is the old API, fully deprecated in macOS 26 —
-///     functional below 26, but returns empty results on 26 (the bug
-///     that made captions appear to do nothing on first ship).
+///     = `true`, for macOS 14 and 15 (or a Mac without the modern
+///     model). Needs Speech Recognition permission, which is only
+///     asked for when the caller says the user expects it
+///     (`mayAskForPermission`).
 ///  3. **Cloud fallback** (`allowCloudFallback: true`). Drops the
 ///     on-device constraint on the legacy recognizer so the request
 ///     goes through Apple's servers. Privacy-sensitive — only used
@@ -24,6 +30,9 @@ import Speech
 enum CaptionTranscriber {
     enum TranscriberError: Error, LocalizedError {
         case notAuthorized
+        /// Speech Recognition hasn't been asked for yet and the caller
+        /// didn't want a system prompt now.
+        case needsPermission
         case unavailable(String)
         case recognizerFailed(String)
         case onDeviceUnsupported
@@ -38,7 +47,9 @@ enum CaptionTranscriber {
         var errorDescription: String? {
             switch self {
             case .notAuthorized:
-                return "Pepper needs Speech Recognition permission to transcribe. Grant it in System Settings → Privacy & Security → Speech Recognition, then try again."
+                return "Captions need Speech Recognition, which is turned off for Pepper. Turn it on in System Settings › Privacy & Security › Speech Recognition, then try again."
+            case .needsPermission:
+                return "On this Mac, captions need Speech Recognition. Click Write captions and macOS will ask for it."
             case .unavailable(let reason):
                 return "Speech recognition isn't available: \(reason)"
             case .recognizerFailed(let reason):
@@ -48,48 +59,58 @@ enum CaptionTranscriber {
             case .siriOrDictationDisabled:
                 return "Pepper needs the on-device Speech model, which Apple only loads when either Siri or Dictation is enabled. Turn one on in System Settings → Apple Intelligence & Siri, or System Settings → Keyboard → Dictation, then click Generate again."
             case .noSpeechDetected:
-                return "No speech was detected in the recording. Two likely causes: (1) the mic was silent or too quiet — check the waveform strip on the timeline, or (2) macOS is still downloading the on-device Speech model after you enabled Siri / Dictation — wait a few minutes and try again."
+                return "Pepper didn't hear any speech in this recording. If you did talk, check the waveform on the timeline: the microphone may have been muted or too quiet."
             case .assetUnavailable(let reason):
                 return "The on-device Speech model for this language isn't installed and couldn't be downloaded: \(reason)"
             }
         }
     }
 
+    /// True when captions come from `SpeechAnalyzer`, which needs no
+    /// permission and has no use for the cloud fallback.
+    static var usesModernPath: Bool {
+        if #available(macOS 26.0, *) { return Speech.SpeechTranscriber.isAvailable }
+        return false
+    }
+
+    /// Writing captions now would make macOS ask for Speech Recognition
+    /// first. The inspector says so next to the button that starts it,
+    /// so the prompt is never a surprise.
+    static var willAskForPermission: Bool {
+        !usesModernPath && SFSpeechRecognizer.authorizationStatus() == .notDetermined
+    }
+
     static func transcribe(
         audioURL: URL,
-        allowCloudFallback: Bool
+        allowCloudFallback: Bool,
+        mayAskForPermission: Bool
     ) async throws -> TranscriptionLog {
-        let auth: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { cont in
-            SFSpeechRecognizer.requestAuthorization { status in
-                cont.resume(returning: status)
-            }
-        }
-        guard auth == .authorized else {
-            throw TranscriberError.notAuthorized
-        }
-
         let preferred = preferredLocale()
         PepperDebug.log("CAPTIONS: preferredLocale=\(preferred.identifier) systemLocale=\(Locale.current.identifier) allowCloudFallback=\(allowCloudFallback)")
 
         // ---- Tier 1: modern SpeechAnalyzer API (macOS 26+) ----
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), Speech.SpeechTranscriber.isAvailable {
             // Try preferred locale, then en-US as fallback.
+            var lastError: Error = TranscriberError.noSpeechDetected
             for loc in dedup([preferred, Locale(identifier: "en-US")]) {
                 do {
                     return try await modernTranscribe(audioURL: audioURL, locale: loc)
-                } catch TranscriberError.assetUnavailable(let reason) {
-                    PepperDebug.log("CAPTIONS: modern API asset unavailable for \(loc.identifier): \(reason) — trying next locale")
                 } catch TranscriberError.noSpeechDetected {
+                    // The model ran and heard nothing; another locale
+                    // won't hear more.
                     PepperDebug.log("CAPTIONS: modern API returned no speech for \(loc.identifier)")
-                    // For "no speech" we can still try the legacy /
-                    // cloud paths — it might be a real silent clip, or
-                    // this locale's modern model failed silently.
-                    break
+                    throw TranscriberError.noSpeechDetected
                 } catch {
                     PepperDebug.log("CAPTIONS: modern API failed on \(loc.identifier): \(error.localizedDescription) — trying next")
+                    lastError = error
                 }
             }
+            throw lastError
         }
+
+        // The legacy recognizer needs permission. Choosing Apple's
+        // servers is itself a request to use speech recognition.
+        try await ensureAuthorized(mayAsk: mayAskForPermission || allowCloudFallback)
 
         // ---- Tier 2: legacy on-device, system locale then en-US ----
         let legacyLocales = dedup([preferred, Locale(identifier: "en-US")])
@@ -107,6 +128,23 @@ enum CaptionTranscriber {
         }
         PepperDebug.log("CAPTIONS: falling back to cloud recognition (audio leaves device)")
         return try await legacyTranscribe(audioURL: audioURL, locale: Locale(identifier: "en-US"), onDeviceOnly: false)
+    }
+
+    /// Speech Recognition for the legacy recognizer. Only prompts when
+    /// the user just clicked something that said macOS would ask.
+    private static func ensureAuthorized(mayAsk: Bool) async throws {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            return
+        case .notDetermined:
+            guard mayAsk else { throw TranscriberError.needsPermission }
+            let status: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { cont in
+                SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
+            }
+            guard status == .authorized else { throw TranscriberError.notAuthorized }
+        default:
+            throw TranscriberError.notAuthorized
+        }
     }
 
     // MARK: - Modern path

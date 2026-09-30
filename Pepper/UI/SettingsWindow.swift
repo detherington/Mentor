@@ -22,6 +22,7 @@ final class SettingsWindowController {
         win.title = "Pepper Settings"
         win.contentView = NSHostingView(rootView: SettingsView())
         win.center()
+        win.setFrameAutosaveName("PepperSettings")
         win.isReleasedWhenClosed = false
         self.window = win
         NSApp.activate(ignoringOtherApps: true)
