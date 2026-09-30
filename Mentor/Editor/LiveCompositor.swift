@@ -9,58 +9,36 @@ import Metal
 /// (webcam position / shape / diameter) live against the raw screen + webcam
 /// tracks recorded into the `.mentor` sidecar.
 ///
-/// State flow: the editor view model writes to `LiveCompositor.state`; AVFoundation
-/// instantiates the compositor and calls `startRequest(_:)` for each frame,
-/// where we snapshot state and render. To trigger a redraw when paused, the
-/// view model re-seeks to the current time.
+/// State flow: each composition carries its own `State` (reached through the
+/// frame's `Instruction`), which the editor view model — or `FinalRenderer`,
+/// for an export — writes to. AVFoundation instantiates the compositor and
+/// calls `startRequest(_:)` for each frame, where we snapshot that state and
+/// render. To trigger a redraw when paused, the view model re-seeks to the
+/// current time.
 final class LiveCompositor: NSObject, AVVideoCompositing {
 
     // MARK: - Shared state
 
-    /// Thread-safe container for the editor's current overlay settings.
+    /// Thread-safe holder for what the compositor reads each frame: the
+    /// overlay settings plus the output time map. One per composition.
     final class State: @unchecked Sendable {
+        /// A frame's worth of state. Overlay fields read straight through
+        /// (`snapshot.position`, `snapshot.captionStyle`, …).
+        @dynamicMemberLookup
         struct Snapshot {
-            let position: WebcamPosition
-            let shape: WebcamShape
-            let diameter: CGFloat       // output pixels
-            let inset: CGFloat          // output pixels
-            /// If set, overrides the corner-preset placement with an
-            /// explicit bottom-left origin in output-pixel space.
-            /// Populated by drag-to-reposition in the editor; cleared
-            /// when the user picks a preset corner from the inspector.
-            let webcamCustomOrigin: CGPoint?
-            let zoomKeyframes: [ZoomKeyframe]
-            let webcamTransitions: WebcamTransitions
-            let startCard: TitleCard
-            let endCard: TitleCard
+            let overlay: OverlaySettings
             /// Effective output time map — the outer trim window plus
             /// any interior cuts. Webcam fades + title cards key to
             /// `trimMap.outputDuration` (the true length of what the
             /// viewer sees), NOT the full composition, so trimming /
-            /// cutting doesn't push cards out of view. Defaults to zero
-            /// for the initial snapshot; replaced by the editor /
-            /// renderer once the composition is known.
+            /// cutting doesn't push cards out of view. Zero-length for
+            /// the initial snapshot; replaced by the editor / renderer
+            /// once the composition is known.
             let trimMap: TrimMap
-            let cursorRipples: [CursorRipple]
-            let cursorRippleStyle: CursorRippleStyle
-            let talkingHeadKeyframes: [TalkingHeadKeyframe]
-            /// Burned-in subtitles. Empty `lines` or `style.enabled`
-            /// false → compositor short-circuits before per-frame lookup.
-            let transcriptionLines: [TranscriptionLine]
-            let captionStyle: CaptionStyle
-            /// Keystroke overlay chips. Same short-circuit rule —
-            /// empty or `style.enabled == false` bypasses the overlay
-            /// pass entirely.
-            let keystrokeChips: [KeystrokeChip]
-            let keystrokeOverlayStyle: KeystrokeOverlayStyle
-            /// Always-on cursor highlight halo. Position is interpolated
-            /// from the samples in `cursorTrack`. Empty track or
-            /// `style.enabled == false` skips the overlay entirely.
-            let cursorTrack: CursorHighlightTrack
-            let cursorHighlightStyle: CursorHighlightStyle
-            /// Webcam background processing (blur / color). `off` skips
-            /// the per-frame segmentation pass entirely.
-            let webcamBackgroundStyle: WebcamBackgroundStyle
+
+            subscript<T>(dynamicMember keyPath: KeyPath<OverlaySettings, T>) -> T {
+                overlay[keyPath: keyPath]
+            }
         }
 
         private let lock = NSLock()
@@ -75,60 +53,11 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
             return current
         }
 
-        func update(
-            position: WebcamPosition? = nil,
-            shape: WebcamShape? = nil,
-            diameter: CGFloat? = nil,
-            inset: CGFloat? = nil,
-            webcamCustomOrigin: CGPoint?? = nil,
-            zoomKeyframes: [ZoomKeyframe]? = nil,
-            webcamTransitions: WebcamTransitions? = nil,
-            startCard: TitleCard? = nil,
-            endCard: TitleCard? = nil,
-            trimMap: TrimMap? = nil,
-            cursorRipples: [CursorRipple]? = nil,
-            cursorRippleStyle: CursorRippleStyle? = nil,
-            talkingHeadKeyframes: [TalkingHeadKeyframe]? = nil,
-            transcriptionLines: [TranscriptionLine]? = nil,
-            captionStyle: CaptionStyle? = nil,
-            keystrokeChips: [KeystrokeChip]? = nil,
-            keystrokeOverlayStyle: KeystrokeOverlayStyle? = nil,
-            cursorTrack: CursorHighlightTrack? = nil,
-            cursorHighlightStyle: CursorHighlightStyle? = nil,
-            webcamBackgroundStyle: WebcamBackgroundStyle? = nil
-        ) {
+        /// Replace everything at once — callers always hold the full
+        /// settings, so there's no partial-update path to get wrong.
+        func set(_ overlay: OverlaySettings, trimMap: TrimMap) {
             lock.lock(); defer { lock.unlock() }
-            // `CGPoint??` lets us distinguish "don't touch" (.none —
-            // caller omitted the arg) from "clear to nil"
-            // (.some(nil)). The viewmodel writes the full state on
-            // every call, so it always passes the .some branch.
-            let newCustomOrigin: CGPoint?
-            switch webcamCustomOrigin {
-            case .some(let v): newCustomOrigin = v
-            case .none:        newCustomOrigin = current.webcamCustomOrigin
-            }
-            current = Snapshot(
-                position: position ?? current.position,
-                shape: shape ?? current.shape,
-                diameter: diameter ?? current.diameter,
-                inset: inset ?? current.inset,
-                webcamCustomOrigin: newCustomOrigin,
-                zoomKeyframes: zoomKeyframes ?? current.zoomKeyframes,
-                webcamTransitions: webcamTransitions ?? current.webcamTransitions,
-                startCard: startCard ?? current.startCard,
-                endCard: endCard ?? current.endCard,
-                trimMap: trimMap ?? current.trimMap,
-                cursorRipples: cursorRipples ?? current.cursorRipples,
-                cursorRippleStyle: cursorRippleStyle ?? current.cursorRippleStyle,
-                talkingHeadKeyframes: talkingHeadKeyframes ?? current.talkingHeadKeyframes,
-                transcriptionLines: transcriptionLines ?? current.transcriptionLines,
-                captionStyle: captionStyle ?? current.captionStyle,
-                keystrokeChips: keystrokeChips ?? current.keystrokeChips,
-                keystrokeOverlayStyle: keystrokeOverlayStyle ?? current.keystrokeOverlayStyle,
-                cursorTrack: cursorTrack ?? current.cursorTrack,
-                cursorHighlightStyle: cursorHighlightStyle ?? current.cursorHighlightStyle,
-                webcamBackgroundStyle: webcamBackgroundStyle ?? current.webcamBackgroundStyle
-            )
+            current = Snapshot(overlay: overlay, trimMap: trimMap)
         }
     }
 
@@ -141,30 +70,10 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
     /// avoid polluting the render. Per-instruction state lets them
     /// coexist fully.
     static func defaultState() -> State {
-        State(
-            State.Snapshot(
-                position: .bottomRight,
-                shape: .circle,
-                diameter: 640,
-                inset: 96,
-                webcamCustomOrigin: nil,
-                zoomKeyframes: [],
-                webcamTransitions: .default,
-                startCard: .defaultStart,
-                endCard: .defaultEnd,
-                trimMap: .entire(CMTimeRange(start: .zero, duration: .zero)),
-                cursorRipples: [],
-                cursorRippleStyle: .default,
-                talkingHeadKeyframes: [],
-                transcriptionLines: [],
-                captionStyle: .default,
-                keystrokeChips: [],
-                keystrokeOverlayStyle: .default,
-                cursorTrack: .empty,
-                cursorHighlightStyle: .default,
-                webcamBackgroundStyle: .default
-            )
-        )
+        State(State.Snapshot(
+            overlay: OverlaySettings(),
+            trimMap: .entire(CMTimeRange(start: .zero, duration: .zero))
+        ))
     }
 
     // MARK: - AVVideoCompositing
@@ -186,6 +95,16 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
     private let contextLock = NSLock()
     private var renderContext: AVVideoCompositionRenderContext?
     private var cancelled = false
+
+    /// Person segmentation for the webcam background effect. One per
+    /// compositor, used only on `renderQueue` (Vision's sequence handler
+    /// isn't thread-safe) — it used to build a new request + handler
+    /// every frame.
+    private let backgroundProcessor = WebcamBackgroundProcessor()
+
+    /// Cursor halo rasterised once per style, positioned per frame.
+    private var cachedHaloStyle: CursorHighlightStyle?
+    private var cachedHaloImage: CIImage?
 
     // Mask cache (regenerated when shape/diameter changes)
     private var cachedMaskShape: WebcamShape?
@@ -383,12 +302,6 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         )
     }
 
-    /// Render the active cursor ripples (if any) to a transparent canvas-
-    /// sized CIImage. Returns nil when no ripple is currently visible —
-    /// that's the common case, so we skip the CGContext allocation
-    /// entirely. Each ripple is a stroked circle whose radius grows
-    /// linearly from `initialRadius` to `finalRadius` over its lifetime,
-    /// while opacity fades linearly to 0.
     /// Render the always-on cursor highlight halo at the interpolated
     /// cursor position for the current frame. Returns nil when the
     /// overlay is disabled, the track is empty, or the cursor was off-
@@ -402,9 +315,23 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         let t = CMTimeGetSeconds(time)
         guard t.isFinite else { return nil }
         guard let pos = layout.cursorTrack.position(at: t) else { return nil }
-        return CursorHighlightRenderer.render(center: pos, style: style)
+        if cachedHaloStyle != style {
+            cachedHaloStyle = style
+            cachedHaloImage = CursorHighlightRenderer.render(style: style)
+        }
+        guard let halo = cachedHaloImage else { return nil }
+        return halo.transformed(by: CGAffineTransform(
+            translationX: pos.x - style.radius,
+            y: pos.y - style.radius
+        ))
     }
 
+    /// Render the active cursor ripples (if any), positioned in canvas
+    /// space. Returns nil when no ripple is currently visible — the common
+    /// case, so the CGContext allocation is skipped entirely. Each ripple
+    /// is a stroked circle whose radius grows linearly from
+    /// `initialRadius` to `finalRadius` over its lifetime, while opacity
+    /// fades linearly to 0.
     private func renderCursorRipples(
         at time: CMTime,
         layout: State.Snapshot,
@@ -432,18 +359,34 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         }
         guard !active.isEmpty else { return nil }
 
-        let w = max(1, Int(canvasSize.width))
-        let h = max(1, Int(canvasSize.height))
+        // Rasterise only the rings' bounding box, not the whole canvas —
+        // a full-frame bitmap was ~34 MB per frame at 3600×2338 for a
+        // ring a few hundred pixels across.
+        let pad = style.strokeWidth
+        let rings = active.reduce(CGRect.null) { box, a in
+            box.union(CGRect(
+                x: a.center.x - a.radius - pad,
+                y: a.center.y - a.radius - pad,
+                width: (a.radius + pad) * 2,
+                height: (a.radius + pad) * 2
+            ))
+        }
+        let box = rings
+            .intersection(CGRect(origin: .zero, size: canvasSize))
+            .integral
+        guard !box.isNull, box.width >= 1, box.height >= 1 else { return nil }
+
         let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: nil,
-            width: w,
-            height: h,
+            width: Int(box.width),
+            height: Int(box.height),
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: space,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
+        ctx.translateBy(x: -box.minX, y: -box.minY)
 
         ctx.setLineWidth(style.strokeWidth)
         ctx.setLineCap(.round)
@@ -468,6 +411,7 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
 
         guard let cg = ctx.makeImage() else { return nil }
         return CIImage(cgImage: cg)
+            .transformed(by: CGAffineTransform(translationX: box.minX, y: box.minY))
     }
 
     /// Multiply `image`'s alpha channel by `a` (0...1). Implemented via
@@ -482,12 +426,6 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         return f.outputImage ?? image
     }
 
-    /// Composite the start + end title cards over `base` if either is
-    /// active at `time`. Card opacity follows an easeInOutCubic envelope
-    /// so the cross-fade has the same feel as the smart-zoom ramps.
-    /// Time math is in **output time** (i.e. relative to `outputRange.start`),
-    /// so trimming the start of the recording doesn't push the start card
-    /// out of view.
     /// Composite the active subtitle line (if any) over `base`. Cached
     /// by `{text, style, size}` so the same rendered image is reused
     /// for every frame the line is on screen.
@@ -639,6 +577,12 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         return composite
     }
 
+    /// Composite the start + end title cards over `base` if either is
+    /// active at `time`. Card opacity follows an easeInOutCubic envelope
+    /// so the cross-fade has the same feel as the smart-zoom ramps.
+    /// Time math is in **output time** (i.e. relative to `outputRange.start`),
+    /// so trimming the start of the recording doesn't push the start card
+    /// out of view.
     private func applyTitleCards(
         over base: CIImage,
         layout: State.Snapshot,
@@ -846,7 +790,7 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         // mask on macOS and effectively blurs the whole frame.
         let processed: CIImage
         if backgroundStyle.mode != .off {
-            processed = WebcamBackgroundProcessor.apply(to: cropped, style: backgroundStyle)
+            processed = backgroundProcessor.apply(to: cropped, style: backgroundStyle)
         } else {
             processed = cropped
         }
@@ -870,7 +814,7 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         }
         let mask = maskImage(shape: shape, diameter: diameter)
         let background = CIImage(color: CIColor.clear).cropped(to: bounds)
-        // Use luminance-based mask (matches FrameCompositor); our mask has no
+        // Use a luminance-based mask; our mask has no
         // alpha channel, so `CIBlendWithAlphaMask` renders the webcam as a
         // plain rectangle with no shape.
         return mirrored.applyingFilter("CIBlendWithMask", parameters: [
@@ -879,17 +823,25 @@ final class LiveCompositor: NSObject, AVVideoCompositing {
         ]).cropped(to: bounds)
     }
 
+    /// The mask is rasterised at `diameter` rounded up to a 128 px
+    /// bucket and scaled to the exact size. Keyed on the exact diameter,
+    /// it was redrawn every frame of a talking-head size ramp; bucketed,
+    /// a whole ramp costs a handful of redraws, and the ≤128 px downscale
+    /// is invisible on an anti-aliased edge.
     private func maskImage(shape: WebcamShape, diameter: CGFloat) -> CIImage {
-        if let cached = cachedMaskImage,
-           cachedMaskShape == shape,
-           cachedMaskDiameter == diameter {
-            return cached
+        let bucket = max(128, (diameter / 128).rounded(.up) * 128)
+        let base: CIImage
+        if let cached = cachedMaskImage, cachedMaskShape == shape, cachedMaskDiameter == bucket {
+            base = cached
+        } else {
+            base = Self.makeShapeMask(shape: shape, diameter: bucket)
+            cachedMaskShape = shape
+            cachedMaskDiameter = bucket
+            cachedMaskImage = base
         }
-        let img = Self.makeShapeMask(shape: shape, diameter: diameter)
-        cachedMaskShape = shape
-        cachedMaskDiameter = diameter
-        cachedMaskImage = img
-        return img
+        guard bucket != diameter else { return base }
+        let s = diameter / bucket
+        return base.transformed(by: CGAffineTransform(scaleX: s, y: s))
     }
 
     private static func makeShapeMask(shape: WebcamShape, diameter: CGFloat) -> CIImage {

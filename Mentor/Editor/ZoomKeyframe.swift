@@ -89,11 +89,6 @@ struct ZoomKeyframe: Identifiable, Equatable, Codable, Sendable {
     /// End of the zoom-out ramp — anything past this is back at 1.0x.
     var endTime: CMTime { CMTimeAdd(holdEndTime, outDuration) }
 
-    /// Composition-time range covered by this keyframe.
-    var timeRange: CMTimeRange {
-        CMTimeRange(start: startTime, end: endTime)
-    }
-
     /// Peak time (start of the held plateau).
     var peakStartTime: CMTime { CMTimeAdd(startTime, inDuration) }
 

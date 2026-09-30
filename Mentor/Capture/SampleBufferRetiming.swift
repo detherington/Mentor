@@ -69,4 +69,25 @@ extension CMSampleBuffer {
         )
         return copyStatus == noErr ? newBuffer : nil
     }
+
+    /// Copy of a single-timing (video) sample buffer re-stamped at
+    /// `pts`. Used to re-append the last screen frame at stop time so
+    /// the track's final frame holds until the recording's end instead
+    /// of ending at the last on-screen change.
+    func restamped(at pts: CMTime) -> CMSampleBuffer? {
+        var timing = CMSampleTimingInfo(
+            duration: .invalid,
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        var newBuffer: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: self,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &newBuffer
+        )
+        return status == noErr ? newBuffer : nil
+    }
 }

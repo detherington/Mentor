@@ -36,6 +36,9 @@ struct RecordingBundle {
     /// Persisted zoom keyframes (auto-generated on first editor open,
     /// but preserved + editable after that).
     var zoomURL: URL            { sidecarURL.appendingPathComponent("zoom.json") }
+    /// Trim, cuts and webcam layout from the editor (`EditState`).
+    /// Written by the editor only; absent until the first edit.
+    var editStateURL: URL       { sidecarURL.appendingPathComponent("edit-state.json") }
     /// Burned-in subtitles — populated the first time the user clicks
     /// "Generate captions" in the editor, and used verbatim on reopen.
     var transcriptionURL: URL   { sidecarURL.appendingPathComponent("transcription.json") }

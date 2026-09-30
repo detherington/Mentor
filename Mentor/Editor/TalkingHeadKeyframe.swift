@@ -79,7 +79,6 @@ struct TalkingHeadKeyframe: Identifiable, Equatable, Codable, Sendable {
 
     var endTime: CMTime { CMTimeAdd(holdEndTime, outDuration) }
     var peakStartTime: CMTime { CMTimeAdd(startTime, inDuration) }
-    var timeRange: CMTimeRange { CMTimeRange(start: startTime, end: endTime) }
 
     func contains(_ t: CMTime) -> Bool {
         CMTimeCompare(t, startTime) >= 0 && CMTimeCompare(t, endTime) < 0

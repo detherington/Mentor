@@ -4,12 +4,15 @@
      version="2.0">
     <channel>
         <title>Mentor</title>
-        <description>Auto-update feed for Mentor. Each release pushes a new &lt;item&gt; to the top of this file.</description>
+        <description>Legacy auto-update feed for Mentor 1.1.1 and earlier.</description>
         <language>en</language>
 
-        <!-- Append new release items here, newest first.
-             Emit them with `./build-dmg.sh` and paste the <item> block
-             its output prints. -->
+        <!-- Legacy feed. Mentor up to 1.1.1 polls this file; newer
+             versions poll https://sbsorbis.com/download/mentor/appcast.xml.
+             Releases are published on Orbis (scripts/release.sh). The only
+             item ever added here again is the bridge: a copy of the first
+             Orbis release's item, pointing at its zip on sbsorbis.com, so
+             older copies update into the new feed. Keep this file. -->
 
         <item>
             <title>Version 1.1.1</title>

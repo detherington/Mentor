@@ -80,25 +80,6 @@ struct TrimMap: Equatable, Sendable {
         keptRanges.reduce(.zero) { CMTimeAdd($0, $1.duration) }
     }
 
-    /// Convert a time in the output timeline (where t=0 is the start of
-    /// the first kept segment) to the corresponding source time.
-    /// Returns the clamped boundary if the input falls outside
-    /// `[0, outputDuration]`.
-    func sourceTime(forOutputTime outputTime: CMTime) -> CMTime {
-        if CMTimeCompare(outputTime, .zero) <= 0 {
-            return outerTrim.start
-        }
-        var remaining = outputTime
-        for range in keptRanges {
-            if CMTimeCompare(remaining, range.duration) <= 0 {
-                return CMTimeAdd(range.start, remaining)
-            }
-            remaining = CMTimeSubtract(remaining, range.duration)
-        }
-        // Past the end — clamp to outerTrim.end.
-        return outerTrim.end
-    }
-
     /// Convert a source time to the corresponding output time. If
     /// `sourceTime` falls inside a cut range, returns the output time of
     /// the *end* of that cut (the next frame that will actually play).
@@ -131,28 +112,6 @@ struct TrimMap: Equatable, Sendable {
             }
         }
         return false
-    }
-
-    // MARK: - Mutation helpers (return new TrimMap; TrimMap is immutable)
-
-    /// Add a cut range. Overlaps with existing cuts are merged; parts
-    /// outside `outerTrim` are clamped or dropped.
-    func inserting(_ cut: CMTimeRange) -> TrimMap {
-        TrimMap(outerTrim: outerTrim, cuts: cuts + [cut])
-    }
-
-    /// Remove the cut at `index` (no-op if out of range).
-    func removing(cutAt index: Int) -> TrimMap {
-        guard cuts.indices.contains(index) else { return self }
-        var next = cuts
-        next.remove(at: index)
-        return TrimMap(outerTrim: outerTrim, cuts: next)
-    }
-
-    /// Replace the outer trim. Any cut now outside the new outer range
-    /// is clamped or dropped by `normalise`.
-    func withOuterTrim(_ range: CMTimeRange) -> TrimMap {
-        TrimMap(outerTrim: range, cuts: cuts)
     }
 
     // MARK: - Normalisation

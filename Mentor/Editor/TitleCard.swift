@@ -9,8 +9,6 @@ import SwiftUI
 /// a recording. Cards aren't part of the captured `.mentor` bundle —
 /// they're set in the editor and baked into the export.
 struct TitleCard: Equatable, Codable, Sendable {
-    enum Position: Sendable { case start, end }
-
     var enabled: Bool
     var title: String
     var subtitle: String
@@ -274,7 +272,6 @@ struct ColorRGBA: Equatable, Hashable, Codable, Sendable {
     }
 
     static let white = ColorRGBA(red: 1, green: 1, blue: 1)
-    static let black = ColorRGBA(red: 0, green: 0, blue: 0)
 
     var cgColor: CGColor {
         CGColor(srgbRed: red, green: green, blue: blue, alpha: alpha)

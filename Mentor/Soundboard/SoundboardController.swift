@@ -50,9 +50,27 @@ final class SoundboardController {
     @ObservationIgnored private var recordingStartUptime: TimeInterval = 0
     @ObservationIgnored private var recordedCueFires: [SoundboardEventLog.Fired] = []
     @ObservationIgnored private var pendingEventLogURL: URL?
+    /// Mirrors the capture pause so cue times line up with the retimed
+    /// A/V (same scheme as `EventRecorder`): fires while paused aren't
+    /// logged, later ones subtract the cumulative paused time.
+    @ObservationIgnored private var recordingPaused = false
+    @ObservationIgnored private var pausedOffset: TimeInterval = 0
 
     init() {
-        self.cues = Settings.shared.soundboardCues
+        // Shift-only bindings (⇧A) fired on every capital letter typed in
+        // any app; they can no longer be captured, so drop saved ones
+        // and let the user rebind.
+        var cues = Settings.shared.soundboardCues
+        var dropped = 0
+        for i in cues.indices where cues[i].hotkey.map({ !$0.isSafeGlobalBinding }) == true {
+            cues[i].hotkey = nil
+            dropped += 1
+        }
+        self.cues = cues
+        if dropped > 0 {
+            Settings.shared.soundboardCues = cues
+            MentorDebug.log("SOUNDBOARD: cleared \(dropped) Shift-only hotkey(s)")
+        }
         ensureEngineRunning()
     }
 
@@ -126,6 +144,9 @@ final class SoundboardController {
                 cue.hotkey = hotkey
                 updateCue(cue)
                 capturingHotkeyForCueID = nil
+            } else {
+                // Needs ⌘, ⌥ or ⌃ — keep listening, but say so.
+                NSSound.beep()
             }
             // Consume — don't want the pressed keys to also play another
             // cue or leak into a focused app.
@@ -138,8 +159,8 @@ final class SoundboardController {
                 // Log the fire if we're mid-recording — gives the editor
                 // timeline accurate cue markers without having to
                 // retroactively infer them from audio bursts.
-                if recordingActive {
-                    let t = ProcessInfo.processInfo.systemUptime - recordingStartUptime
+                if recordingActive, !recordingPaused {
+                    let t = ProcessInfo.processInfo.systemUptime - recordingStartUptime - pausedOffset
                     if t >= 0 {
                         recordedCueFires.append(SoundboardEventLog.Fired(
                             t: t, cueID: cue.id, cueName: cue.name
@@ -233,12 +254,33 @@ final class SoundboardController {
         recordingStartUptime = ProcessInfo.processInfo.systemUptime
         recordedCueFires.removeAll(keepingCapacity: true)
         pendingEventLogURL = eventLogURL
+        recordingPaused = false
+        pausedOffset = 0
         recordingActive = true
     }
 
-    func stopRecordingTap() async {
+    /// Called with the capture coordinator's pause / resume.
+    /// `cumulativeOffsetSeconds` is its total paused time so far.
+    func setRecordingPaused(_ paused: Bool, cumulativeOffsetSeconds: TimeInterval) {
+        guard recordingActive else { return }
+        recordingPaused = paused
+        if !paused { pausedOffset = cumulativeOffsetSeconds }
+        engine.setRecordingPaused(paused)
+    }
+
+    /// `origin`: the recording's shared time zero (first screen frame,
+    /// `systemUptime` seconds). Cue times and the audio are both rebased
+    /// to it — the tap starts before screen capture is up.
+    func stopRecordingTap(timeOriginUptime origin: TimeInterval? = nil) async {
         recordingActive = false
         engine.speakerOutputMuted = false
+        if let origin {
+            let shift = origin - recordingStartUptime
+            recordedCueFires = recordedCueFires.compactMap { f in
+                let t = f.t - shift
+                return t >= 0 ? SoundboardEventLog.Fired(t: t, cueID: f.cueID, cueName: f.cueName) : nil
+            }
+        }
 
         // Flush the cue-fire log before awaiting the transcode (the bundle
         // is considered complete only after both land).
@@ -261,6 +303,6 @@ final class SoundboardController {
         recordedCueFires.removeAll(keepingCapacity: false)
         pendingEventLogURL = nil
 
-        await engine.stopRecordingTap()
+        await engine.stopRecordingTap(timeOriginUptime: origin)
     }
 }

@@ -1,41 +1,72 @@
 import Foundation
 import Security
 
-/// Persists the user's Orbis Personal Access Token in the macOS
-/// login keychain under service `com.sbscomms.mentor.orbis`. One
-/// token per user account — we overwrite on save.
+/// Orbis sign-in credentials in the macOS login keychain under service
+/// `com.sbscomms.mentor.orbis`: one refresh token per host.
 ///
-/// Deliberately no export APIs: nothing else in Mentor should need
-/// to read the PAT outside of `OrbisClient` callers that already
-/// hold a reference via `tokenForCurrentUser()`.
+/// Keyed by host so a credential is only ever sent to the Orbis that
+/// issued it. There used to be one global token with an editable host
+/// field — pointing Mentor at another host handed that host your token.
+///
+/// Only `OrbisAccount` reads or writes these.
 enum OrbisKeychain {
     private static let service = "com.sbscomms.mentor.orbis"
-    private static let account = "orbis_pat"
 
-    /// Write or overwrite the token. Throws if the keychain refuses
-    /// the save (rare — usually a sandbox / entitlement issue, which
-    /// Mentor isn't sandboxed so shouldn't hit).
-    static func saveToken(_ token: String) throws {
-        let data = Data(token.utf8)
+    private static func refreshAccount(_ host: String) -> String {
+        "oauth_refresh@\(host.lowercased())"
+    }
 
-        // Always delete first so we don't have to juggle
-        // SecItemAdd vs SecItemUpdate semantics — the delete is a
-        // no-op when there's nothing there.
-        let deleteQuery: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+    static func saveRefreshToken(_ token: String, host: String) throws {
+        try write(Data(token.utf8), account: refreshAccount(host))
+    }
+
+    static func loadRefreshToken(host: String) -> String? {
+        read(account: refreshAccount(host))
+    }
+
+    static func deleteRefreshToken(host: String) {
+        remove(account: refreshAccount(host))
+    }
+
+    /// Delete every personal access token Mentor ever stored — the
+    /// host-less `orbis_pat` item from 1.1.x and the per-host `pat@…`
+    /// items from the build that briefly kept them — now that Orbis
+    /// sign-in is the only way in. Returns true if anything was removed,
+    /// so the UI can tell an upgrading user to sign in once.
+    @discardableResult
+    static func purgePersonalTokens() -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String:            kSecClassGenericPassword,
+            kSecAttrService as String:      service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String:       kSecMatchLimitAll,
         ]
-        SecItemDelete(deleteQuery as CFDictionary)
+        var items: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
+              let attributes = items as? [[String: Any]] else {
+            return false
+        }
+        var removed = false
+        for item in attributes {
+            guard let account = item[kSecAttrAccount as String] as? String,
+                  account == "orbis_pat" || account.hasPrefix("pat@") else { continue }
+            remove(account: account)
+            removed = true
+        }
+        return removed
+    }
 
+    // MARK: - SecItem plumbing
+
+    private static func write(_ data: Data, account: String) throws {
+        // Delete then add, so we don't juggle SecItemAdd vs SecItemUpdate
+        // semantics — the delete is a no-op when nothing is there.
+        remove(account: account)
         let addQuery: [String: Any] = [
-            kSecClass as String:        kSecClassGenericPassword,
-            kSecAttrService as String:  service,
-            kSecAttrAccount as String:  account,
-            kSecValueData as String:    data,
-            // Unlocked sessions only — matches how every other
-            // desktop PAT-bearer (GitHub CLI, 1Password etc.) stores
-            // credentials.
+            kSecClass as String:          kSecClassGenericPassword,
+            kSecAttrService as String:    service,
+            kSecAttrAccount as String:    account,
+            kSecValueData as String:      data,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
         ]
         let status = SecItemAdd(addQuery as CFDictionary, nil)
@@ -48,28 +79,23 @@ enum OrbisKeychain {
         }
     }
 
-    /// Fetch the token. Returns nil when nothing is stored — callers
-    /// should surface "not connected" UX in that case.
-    static func loadToken() -> String? {
+    private static func read(account: String) -> String? {
         let query: [String: Any] = [
-            kSecClass as String:        kSecClassGenericPassword,
-            kSecAttrService as String:  service,
-            kSecAttrAccount as String:  account,
-            kSecReturnData as String:   true,
-            kSecMatchLimit as String:   kSecMatchLimitOne,
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String:  true,
+            kSecMatchLimit as String:  kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let token = String(data: data, encoding: .utf8) else {
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else {
             return nil
         }
-        return token
+        return String(data: data, encoding: .utf8)
     }
 
-    /// Remove the stored token (Disconnect flow + 401 handler).
-    static func deleteToken() {
+    private static func remove(account: String) {
         let query: [String: Any] = [
             kSecClass as String:       kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -77,6 +103,4 @@ enum OrbisKeychain {
         ]
         SecItemDelete(query as CFDictionary)
     }
-
-    static var hasToken: Bool { loadToken() != nil }
 }

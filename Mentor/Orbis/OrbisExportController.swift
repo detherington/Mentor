@@ -88,19 +88,36 @@ final class OrbisExportController {
         cleanupTemp()
     }
 
+    /// True while render/upload work is in flight — quit uses this to
+    /// decide whether to warn before tearing the upload down.
+    var isActive: Bool {
+        switch phase {
+        case .idle, .finished, .failed: return false
+        default: return true
+        }
+    }
+
+    /// Cancel and wait for the flow to unwind, so the renderer has
+    /// deleted its partial output before the app exits.
+    func cancelAndWait() async {
+        let running = task
+        cancel()
+        await running?.value
+    }
+
     // MARK: - Flow
 
     private func run(_ request: Request) async {
         defer { cleanupTemp() }
 
-        // 1. Auth check. Keychain might have been wiped between
-        // sheet open and upload click; surface that immediately
-        // rather than failing mid-render.
-        guard let token = OrbisKeychain.loadToken() else {
+        // 1. Auth check. The user may have signed out between sheet
+        // open and upload click; surface that immediately rather than
+        // failing mid-render.
+        guard OrbisAccount.shared.isConnected else {
             fail(OrbisError.tokenMissing)
             return
         }
-        let client = OrbisClient(host: OrbisSettings.shared.host, token: token)
+        let client = OrbisAccount.shared.client()
         setSegment(.preparing, within: 1.0)
 
         // 2. Render the current editor state to a temp MP4. Mirrors
@@ -153,7 +170,12 @@ final class OrbisExportController {
             fail(error)
             return
         }
-        videoID = reservation.video_id
+        // The row the bytes actually land in. An expired-URL retry
+        // reserves a fresh row, and every later step (ingest, complete,
+        // finished) must target that one — not the abandoned first
+        // reservation, which would otherwise be "completed" empty.
+        var uploadedVideoID = reservation.video_id
+        videoID = uploadedVideoID
         if Task.isCancelled { return }
 
         // 4. PUT to R2. Progress reports 0→1 within the segment.
@@ -182,7 +204,8 @@ final class OrbisExportController {
                     sizeBytes: sizeBytes,
                     recordedAt: request.recordedAt
                 )
-                videoID = retry.video_id
+                uploadedVideoID = retry.video_id
+                videoID = uploadedVideoID
                 guard let retryURL = URL(string: retry.upload_url) else {
                     fail(OrbisError.invalidHost(retry.upload_url))
                     return
@@ -212,10 +235,11 @@ final class OrbisExportController {
                 bundle: request.bundle,
                 metadata: request.metadata,
                 transcription: request.transcription,
+                trimMap: request.trimMap,
                 renderedURL: renderedURL
             )
             do {
-                _ = try await client.ingestAssets(videoID: reservation.video_id, payload: assets)
+                _ = try await client.ingestAssets(videoID: uploadedVideoID, payload: assets)
             } catch {
                 MentorDebug.log("ORBIS: ingest-assets failed (continuing): \(error.localizedDescription)")
             }
@@ -229,13 +253,13 @@ final class OrbisExportController {
         phase = .completing
         setSegment(.completing, within: 0.5)
         do {
-            try await client.completeUpload(videoID: reservation.video_id)
+            try await client.completeUpload(videoID: uploadedVideoID)
         } catch {
             fail(error)
             return
         }
         setSegment(.completing, within: 1.0)
-        phase = .finished(videoID: reservation.video_id)
+        phase = .finished(videoID: uploadedVideoID)
         progress = 1.0
         task = nil
     }
@@ -275,6 +299,7 @@ final class OrbisExportController {
         bundle: RecordingBundle,
         metadata: RecordingMetadata,
         transcription: TranscriptionLog?,
+        trimMap: TrimMap?,
         renderedURL: URL
     ) async -> OrbisIngestAssets {
         var payload = OrbisIngestAssets()
@@ -287,7 +312,13 @@ final class OrbisExportController {
         }
 
         if let t = transcription {
-            let utterances = t.lines.map { line in
+            // Transcript lines are in source-recording time; the
+            // uploaded MP4 is post-trim/post-cut. Remap the same way
+            // the SRT sidecar does so Orbis's timestamps line up with
+            // the video it's playing, and lines inside cuts drop out.
+            // nil map → no trim, so source time == output time.
+            let lines = trimMap?.remap(transcriptionLines: t.lines) ?? t.lines
+            let utterances = lines.map { line in
                 OrbisIngestAssets.Utterance(
                     start: Int((line.startSeconds * 1000).rounded()),
                     end:   Int((line.endSeconds   * 1000).rounded()),
@@ -295,7 +326,7 @@ final class OrbisExportController {
                     text: line.text
                 )
             }
-            let flatText = t.lines.map(\.text).joined(separator: " ")
+            let flatText = lines.map(\.text).joined(separator: " ")
             payload.transcript = .init(text: flatText, utterances: utterances)
         }
 

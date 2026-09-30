@@ -11,7 +11,6 @@ struct WebcamTransitions: Equatable, Codable, Sendable {
     var fadeOut: TimeInterval
 
     static let `default` = WebcamTransitions(fadeIn: 0.5, fadeOut: 0.5)
-    static let none      = WebcamTransitions(fadeIn: 0,   fadeOut: 0)
 
     /// Effective alpha (0...1) for the webcam at composition time `t`,
     /// given a total composition duration. Caller multiplies this into the

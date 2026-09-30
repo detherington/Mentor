@@ -8,15 +8,40 @@ final class CountdownOverlay {
     private var label: NSTextField?
     private var current: Int = 0
     private var onComplete: (() -> Void)?
+    private var onCancel: (() -> Void)?
     private var beepEnabled: Bool = false
     private var showGo: Bool = false
+    /// Bumped on cancel so already-scheduled ticks from the cancelled
+    /// run become no-ops instead of completing it.
+    private var generation = 0
+    private var localKeyMonitor: Any?
+    private var globalKeyMonitor: Any?
 
-    func show(seconds: Int, on targetScreen: NSScreen? = nil, onComplete: @escaping () -> Void) {
+    func show(
+        seconds: Int,
+        on targetScreen: NSScreen? = nil,
+        onComplete: @escaping () -> Void,
+        onCancel: @escaping () -> Void = {}
+    ) {
         guard seconds > 0, let screen = targetScreen ?? NSScreen.main else {
             onComplete()
             return
         }
         self.onComplete = onComplete
+        self.onCancel = onCancel
+        generation &+= 1
+        // Esc aborts. The panel is non-activating, so the user's app still
+        // has focus — the global monitor catches Esc there, the local one
+        // when Mentor is frontmost.
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return event }
+            self?.cancel()
+            return nil
+        }
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return }
+            Task { @MainActor in self?.cancel() }
+        }
         self.current = seconds
         // Snapshot Settings once — users changing these mid-countdown
         // would be weird and the read-on-every-tick is free to skip.
@@ -104,8 +129,9 @@ final class CountdownOverlay {
             return
         }
         label.stringValue = "\(current)"
+        let run = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self else { return }
+            guard let self, self.generation == run else { return }
             self.current -= 1
             if self.current > 0 {
                 if self.beepEnabled { self.playTickSound(highPitch: false) }
@@ -122,18 +148,39 @@ final class CountdownOverlay {
         // Short hold — long enough to register, short enough not to
         // delay the recording. 300 ms matches typical "screen flash"
         // cues in other capture apps.
+        let run = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.dismiss()
+            guard let self, self.generation == run else { return }
+            self.dismiss()
         }
     }
 
+    /// Abort without starting the recording (Esc, or the record
+    /// shortcut pressed again). No-op when no countdown is showing.
+    func cancel() {
+        guard window != nil else { return }
+        generation &+= 1
+        let cb = onCancel
+        teardown()
+        cb?()
+    }
+
     private func dismiss() {
+        let cb = onComplete
+        teardown()
+        cb?()
+    }
+
+    private func teardown() {
         window?.orderOut(nil)
         window = nil
         label = nil
-        let cb = onComplete
         onComplete = nil
-        cb?()
+        onCancel = nil
+        if let m = localKeyMonitor { NSEvent.removeMonitor(m) }
+        if let m = globalKeyMonitor { NSEvent.removeMonitor(m) }
+        localKeyMonitor = nil
+        globalKeyMonitor = nil
     }
 
     /// Play a short system tick/chime. `highPitch` lifts the final

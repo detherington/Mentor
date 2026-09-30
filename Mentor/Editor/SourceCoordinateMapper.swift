@@ -41,11 +41,7 @@ enum SourceCoordinateMapper {
 
         switch metadata.source.kind {
         case "display":
-            guard let displayID = metadata.source.displayID,
-                  let screen = screen(forDisplayID: displayID) else {
-                return nil
-            }
-            let frame = screen.frame
+            guard let frame = displayFrame(for: metadata) else { return nil }
             guard frame.contains(p) else { return nil }
             let local = CGPoint(x: p.x - frame.minX, y: p.y - frame.minY)
             let sx = imageSize.width / frame.width
@@ -61,7 +57,7 @@ enum SourceCoordinateMapper {
             }
             // Convert window frame from Quartz (top-left primary) to Cocoa
             // (bottom-left primary) via primary screen height.
-            let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+            let primaryHeight = primaryScreenHeight(for: metadata)
             let windowOriginCocoa = CGPoint(
                 x: wx,
                 y: primaryHeight - wy - wh
@@ -80,15 +76,13 @@ enum SourceCoordinateMapper {
             return CGPoint(x: local.x * sx, y: local.y * sy)
 
         case "region":
-            guard let displayID = metadata.source.displayID,
-                  let screen = screen(forDisplayID: displayID),
+            guard let displayFrame = displayFrame(for: metadata),
                   let rx = metadata.source.regionX,
                   let ry = metadata.source.regionY,
                   let rw = metadata.source.regionWidth,
                   let rh = metadata.source.regionHeight else {
                 return nil
             }
-            let displayFrame = screen.frame
             guard displayFrame.contains(p) else { return nil }
             let localCocoa = CGPoint(
                 x: p.x - displayFrame.minX,
@@ -115,6 +109,23 @@ enum SourceCoordinateMapper {
         default:
             return nil
         }
+    }
+
+    /// The captured display's frame as it was while recording (stored in
+    /// metadata), falling back to the live screen for older bundles.
+    private static func displayFrame(for metadata: RecordingMetadata) -> CGRect? {
+        let source = metadata.source
+        if let x = source.displayFrameX, let y = source.displayFrameY,
+           let w = source.displayFrameWidth, let h = source.displayFrameHeight {
+            return CGRect(x: x, y: y, width: w, height: h)
+        }
+        guard let id = source.displayID else { return nil }
+        return screen(forDisplayID: id)?.frame
+    }
+
+    private static func primaryScreenHeight(for metadata: RecordingMetadata) -> CGFloat {
+        if let h = metadata.source.primaryScreenHeight { return CGFloat(h) }
+        return NSScreen.screens.first?.frame.height ?? 0
     }
 
     private static func screen(forDisplayID id: UInt32) -> NSScreen? {

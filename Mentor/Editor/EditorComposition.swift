@@ -36,12 +36,8 @@ enum EditorComposition {
         }
     }
 
-    static func build(for project: RecordingProject) async throws -> Result {
-        try await build(bundle: project.bundle, metadata: project.metadata)
-    }
-
-    /// Lower-level builder that only needs the bundle layout + metadata —
-    /// used by the renderer, which doesn't need a full `RecordingProject`.
+    /// Builds from the bundle layout + metadata — shared by the editor
+    /// and the renderer.
     ///
     /// `micOverride`: when non-nil and the file exists, that URL is used
     /// as the mic source instead of `bundle.micAudioURL`. This is how

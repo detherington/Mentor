@@ -143,6 +143,10 @@ final class Settings {
         /// recording. The recording tap still captures cues; this just
         /// prevents mic double-capture if the user isn't on headphones.
         static let soundboardMuteSpeakersDuringRecording = "soundboardMuteSpeakersDuringRecording"
+
+        /// Global record / pause shortcuts. Absent = built-in default.
+        static let shortcutRecordToggle = "shortcutRecordToggle"
+        static let shortcutPauseToggle  = "shortcutPauseToggle"
     }
 
     private init() {
@@ -190,9 +194,9 @@ final class Settings {
         set { defaults.set(Double(newValue), forKey: Key.webcamDiameter); post() }
     }
 
+    /// No UI sets this; recordings use the registered default.
     var webcamInset: CGFloat {
-        get { CGFloat(defaults.double(forKey: Key.webcamInset)) }
-        set { defaults.set(Double(newValue), forKey: Key.webcamInset); post() }
+        CGFloat(defaults.double(forKey: Key.webcamInset))
     }
 
     var captureSystemAudio: Bool {
@@ -361,6 +365,39 @@ final class Settings {
     var soundboardMuteSpeakersDuringRecording: Bool {
         get { defaults.bool(forKey: Key.soundboardMuteSpeakersDuringRecording) }
         set { defaults.set(newValue, forKey: Key.soundboardMuteSpeakersDuringRecording); post() }
+    }
+
+    // MARK: - Global shortcuts
+
+    /// Wrapper so "never customised" (key absent → default combo) and
+    /// "cleared by the user" (stored with a nil combo → no shortcut) are
+    /// distinguishable.
+    private struct StoredShortcut: Codable {
+        let combo: CueHotkey?
+    }
+
+    private func shortcutKey(_ binding: HotkeyBinding) -> String {
+        switch binding {
+        case .recordToggle: return Key.shortcutRecordToggle
+        case .pauseToggle:  return Key.shortcutPauseToggle
+        }
+    }
+
+    /// The effective combo for `binding`, or nil if the user cleared it.
+    func shortcut(for binding: HotkeyBinding) -> CueHotkey? {
+        guard let stored: StoredShortcut = readJSON(shortcutKey(binding)) else {
+            return binding.defaultCombo
+        }
+        return stored.combo
+    }
+
+    /// `nil` clears the shortcut; use `resetShortcut` to restore the default.
+    func setShortcut(_ combo: CueHotkey?, for binding: HotkeyBinding) {
+        writeJSON(StoredShortcut(combo: combo), forKey: shortcutKey(binding))
+    }
+
+    func resetShortcut(for binding: HotkeyBinding) {
+        writeJSON(Optional<StoredShortcut>.none, forKey: shortcutKey(binding))
     }
 
     // MARK: - JSON-blob helpers

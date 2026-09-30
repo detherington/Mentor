@@ -84,13 +84,23 @@ final class CursorSampler: @unchecked Sendable {
         lock.unlock()
     }
 
-    func stop() -> Log? {
+    /// `origin`: the recording's shared time zero — see
+    /// `EventRecorder.stop(rebasedToUptime:)`.
+    func stop(rebasedToUptime origin: TimeInterval? = nil) -> Log? {
         lock.lock()
         guard started else { lock.unlock(); return nil }
         started = false
-        let collected = samples
+        var collected = samples
+        let shift = origin.map { $0 - referenceUptime } ?? 0
         samples.removeAll(keepingCapacity: false)
         lock.unlock()
+
+        if shift != 0 {
+            collected = collected.compactMap { s in
+                let t = s.t - shift
+                return t >= 0 ? Sample(t: t, x: s.x, y: s.y) : nil
+            }
+        }
 
         timer?.cancel()
         timer = nil

@@ -84,6 +84,11 @@ struct OrbisIngestAssetsResponse: Codable, Sendable {
 /// as "retry or surface the message".
 enum OrbisError: LocalizedError, Sendable {
     case tokenMissing
+    /// Browser sign-in didn't complete; the message says why.
+    case signInFailed(String)
+    /// The OAuth token endpoint refused a grant (`invalid_grant`, or
+    /// "401"). For a refresh this ends the session.
+    case oauthRejected(String)
     case tokenInvalid                           // 401
     case permissionDenied                       // 403 on Orbis API (not R2)
     case tooLarge(limitBytes: Int64)            // 413 or precheck
@@ -96,9 +101,13 @@ enum OrbisError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .tokenMissing:
-            return "Not connected to Orbis. Connect in Settings first."
+            return "Not signed in to Orbis. Sign in from Settings → Orbis first."
+        case .signInFailed(let why):
+            return why
+        case .oauthRejected(let code):
+            return "Orbis refused the sign-in (\(code)). Sign in again in Settings."
         case .tokenInvalid:
-            return "Your Orbis session expired. Please reconnect in Settings."
+            return "Orbis no longer accepts Mentor's credentials. Sign in again in Settings."
         case .permissionDenied:
             return "Your Orbis account doesn't have upload permission. Ask an Orbis admin."
         case .tooLarge(let limit):
@@ -119,6 +128,16 @@ enum OrbisError: LocalizedError, Sendable {
             return "Orbis host \"\(h)\" isn't a valid URL."
         }
     }
+}
+
+/// `POST /oauth/token` response. `refresh_token` may be omitted on a
+/// refresh (no rotation); `user` is optional.
+struct OrbisTokenResponse: Decodable, Sendable {
+    let access_token: String
+    let token_type: String?
+    let expires_in: Double?
+    let refresh_token: String?
+    let user: OrbisUser?
 }
 
 /// Maximum accepted upload size per the Orbis contract (5 GB).

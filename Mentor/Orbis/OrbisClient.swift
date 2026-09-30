@@ -12,23 +12,27 @@ import Foundation
 /// server returns 404 (endpoint not deployed yet) — that returns
 /// nil instead of throwing so the export can still finish Step C.
 final class OrbisClient: NSObject, @unchecked Sendable {
+    /// Supplies the bearer credential for each request — the access token
+    /// `OrbisAccount` refreshes as it expires.
+    typealias TokenProvider = @Sendable () async throws -> String
+    /// Called on a 401; returning true means a fresh credential is
+    /// available and the request is retried once.
+    typealias RejectionHandler = @Sendable () async -> Bool
+
     let host: String
-    let token: String
+    private let tokenProvider: TokenProvider
+    private let onRejected: RejectionHandler
 
     /// Dedicated session so the upload progress delegate doesn't
     /// leak into `URLSession.shared` (which other parts of the app,
     /// including Sparkle, use).
     private let session: URLSession
 
-    /// Callback receiver for `URLSessionTaskDelegate` progress
-    /// notifications during the R2 PUT. Protected by `progressLock`
-    /// because the delegate runs on URLSession's queue, not ours.
-    private let progressLock = NSLock()
-    private var progressHandlers: [ObjectIdentifier: (Double) -> Void] = [:]
-
-    init(host: String, token: String) {
+    /// Normally created through `OrbisAccount.client()`.
+    init(host: String, token: @escaping TokenProvider, onRejected: @escaping RejectionHandler = { false }) {
         self.host = host
-        self.token = token
+        self.tokenProvider = token
+        self.onRejected = onRejected
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 3600  // up to 1h for large uploads
@@ -46,7 +50,6 @@ final class OrbisClient: NSObject, @unchecked Sendable {
         let url = try endpoint("/api/auth/user")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        applyAuth(&req)
         return try await performDecoding(req)
     }
 
@@ -54,7 +57,6 @@ final class OrbisClient: NSObject, @unchecked Sendable {
         let url = try endpoint("/api/clients")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        applyAuth(&req)
         // Orbis server isn't live yet — the endpoint may 404. Return
         // empty so the UI still loads, rather than blocking the
         // export sheet. The visibility=client path will surface a
@@ -92,7 +94,6 @@ final class OrbisClient: NSObject, @unchecked Sendable {
         let url = try endpoint("/api/videos")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        applyAuth(&req)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let iso = ISO8601DateFormatter()
@@ -167,7 +168,6 @@ final class OrbisClient: NSObject, @unchecked Sendable {
         let url = try endpoint("/api/videos/\(videoID)/complete")
         var req = URLRequest(url: url)
         req.httpMethod = "PATCH"
-        applyAuth(&req)
         _ = try await performData(req)
     }
 
@@ -183,7 +183,6 @@ final class OrbisClient: NSObject, @unchecked Sendable {
         let url = try endpoint("/api/videos/\(videoID)/ingest-assets")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        applyAuth(&req)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(payload)
         do {
@@ -202,9 +201,11 @@ final class OrbisClient: NSObject, @unchecked Sendable {
         return url
     }
 
-    private func applyAuth(_ req: inout URLRequest) {
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    private func authorized(_ req: URLRequest) async throws -> URLRequest {
+        var req = req
+        req.setValue("Bearer \(try await tokenProvider())", forHTTPHeaderField: "Authorization")
         req.setValue("Mentor/macOS", forHTTPHeaderField: "User-Agent")
+        return req
     }
 
     /// Dispatch + decode. Status handling is centralised here so every
@@ -219,17 +220,23 @@ final class OrbisClient: NSObject, @unchecked Sendable {
     }
 
     /// Raw data variant for endpoints that don't have a body we care
-    /// about (PATCH complete). Same error mapping.
+    /// about (PATCH complete). Same error mapping. Adds the credential,
+    /// and on a 401 gives `onRejected` one chance to supply a fresh one
+    /// (a sign-in access token revoked or expired between refreshes).
     @discardableResult
-    private func performData(_ req: URLRequest) async throws -> Data {
+    private func performData(_ req: URLRequest, isRetry: Bool = false) async throws -> Data {
         do {
-            let (data, response) = try await session.data(for: req)
+            let (data, response) = try await session.data(for: try await authorized(req))
             guard let http = response as? HTTPURLResponse else {
                 return data
             }
             switch http.statusCode {
             case 200..<300: return data
-            case 401:       throw OrbisError.tokenInvalid
+            case 401:
+                if !isRetry, await onRejected() {
+                    return try await performData(req, isRetry: true)
+                }
+                throw OrbisError.tokenInvalid
             case 403:       throw OrbisError.permissionDenied
             case 413:       throw OrbisError.tooLarge(limitBytes: orbisMaxUploadBytes)
             default:

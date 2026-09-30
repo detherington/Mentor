@@ -98,13 +98,10 @@ struct CursorHighlightStyle: Codable, Equatable, Sendable {
 /// Rasterised into a CGContext of just the halo's bounding box (keeps
 /// the render cheap — we don't touch pixels outside the halo).
 enum CursorHighlightRenderer {
-    /// Returns a CIImage sized `2*radius × 2*radius`, translated so
-    /// the halo is centred at `center`. Caller composites directly
-    /// over the base frame.
-    static func render(
-        center: CGPoint,
-        style: CursorHighlightStyle
-    ) -> CIImage? {
+    /// Returns a CIImage sized `2*radius × 2*radius` with its origin at
+    /// zero. The compositor caches it per style and translates it to the
+    /// cursor each frame (the gradient was re-rasterised every frame).
+    static func render(style: CursorHighlightStyle) -> CIImage? {
         let radius = style.radius
         guard radius > 1, style.opacity > 0 else { return nil }
         let side = Int(ceil(radius * 2))
@@ -147,8 +144,6 @@ enum CursorHighlightRenderer {
         )
 
         guard let cg = ctx.makeImage() else { return nil }
-        // Shift so the halo's centre lands at `center` in the output.
         return CIImage(cgImage: cg)
-            .transformed(by: CGAffineTransform(translationX: center.x - radius, y: center.y - radius))
     }
 }

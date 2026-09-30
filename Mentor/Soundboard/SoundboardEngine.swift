@@ -17,7 +17,7 @@ import Foundation
 ///   the mixer's native float32 format; `AVAudioFile(forWriting:)` with
 ///   AAC settings handles the PCM → AAC conversion internally.
 /// * Mic + system audio capture are *not* involved here — those get
-///   written by their own sidecar writers (`AudioWriter`). The editor
+///   written by their own sidecar writers (`TrackWriter`). The editor
 ///   composition combines mic + system + soundboard as three parallel
 ///   audio tracks, and `FinalRenderer`'s `AVAssetReaderAudioMixOutput`
 ///   mixes them down to stereo AAC during export.
@@ -48,6 +48,7 @@ final class SoundboardEngine: @unchecked Sendable {
 
     private let stateLock = NSLock()
     private var started = false
+    private var configObserver: NSObjectProtocol?
 
     /// When true, the speakers are silent but the recording tap (and any
     /// cue events still getting fired) continue uninterrupted. Useful
@@ -71,6 +72,17 @@ final class SoundboardEngine: @unchecked Sendable {
     private var pendingCAFURL: URL?
     /// Target URL for the final M4A (sidecar `soundboard.m4a`).
     private var pendingOutputURL: URL?
+    /// `systemUptime` of the first sample in the CAF — the first tap
+    /// buffer's host time, falling back to install time. The tap starts
+    /// before screen capture is up, so stop trims the difference.
+    private var tapStartUptime: TimeInterval?
+    /// Recording pauses, in `systemUptime` seconds (end nil while still
+    /// paused). Tap audio inside them is dropped so soundboard.m4a is
+    /// retimed exactly like the other tracks — it used to keep recording
+    /// through pauses and drift later by the total paused time.
+    private var pauseIntervals: [(start: TimeInterval, end: TimeInterval?)] = []
+    /// Built lazily when the mixer's format stops matching the CAF's.
+    private var tapConverter: AVAudioConverter?
 
     // MARK: - Lifecycle
 
@@ -105,23 +117,40 @@ final class SoundboardEngine: @unchecked Sendable {
 
         try engine.start()
         started = true
-    }
 
-    func stop() {
-        stateLock.lock(); defer { stateLock.unlock() }
-        guard started else { return }
-        // Stop any in-flight players before shutting the engine down,
-        // otherwise they emit a short click.
-        for p in players where p.isPlaying {
-            p.stop()
+        if configObserver == nil {
+            configObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: nil
+            ) { [weak self] _ in
+                self?.handleConfigurationChange()
+            }
         }
-        engine.stop()
-        started = false
     }
 
+    /// An output-device change (AirPods connecting, switching speakers)
+    /// stops the engine. Nothing restarted it, so the next cue called
+    /// `play()` on a stopped engine — which raises an Objective-C
+    /// exception Swift can't catch. Restart it; if that fails, mark it
+    /// stopped so `play()` refuses cleanly.
+    private func handleConfigurationChange() {
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard started, !engine.isRunning else { return }
+        do {
+            try engine.start()
+            MentorDebug.log("SOUNDBOARD: engine restarted after configuration change")
+        } catch {
+            started = false
+            MentorDebug.log("SOUNDBOARD: engine restart after configuration change failed: \(error)")
+        }
+    }
+
+    /// The engine's real state, not just our flag — a configuration
+    /// change can stop it underneath us.
     var isRunning: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
-        return started
+        return started && engine.isRunning
     }
 
     // MARK: - Playback
@@ -233,9 +262,13 @@ final class SoundboardEngine: @unchecked Sendable {
         recordingFile = file
         pendingCAFURL = tempCAF
         pendingOutputURL = outputURL
+        tapStartUptime = nil
+        pauseIntervals = []
+        tapConverter = nil
+        let installUptime = ProcessInfo.processInfo.systemUptime
 
-        tapMixer.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { [weak self] buffer, _ in
-            self?.write(buffer: buffer)
+        tapMixer.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { [weak self] buffer, when in
+            self?.write(buffer: buffer, when: when, installUptime: installUptime)
         }
         tapInstalled = true
     }
@@ -244,11 +277,22 @@ final class SoundboardEngine: @unchecked Sendable {
     /// into the destination M4A. Awaitable — callers wait until the
     /// final M4A exists before the sidecar bundle is considered
     /// complete, so the post-capture render sees it.
-    func stopRecordingTap() async {
+    ///
+    /// `origin` is the recording's shared time zero (first screen frame,
+    /// `systemUptime` seconds). Audio before it is trimmed so the track
+    /// starts in sync with `screen.mov` like every other track.
+    func stopRecordingTap(timeOriginUptime origin: TimeInterval? = nil) async {
         tapLock.lock()
         let cafURL = pendingCAFURL
         let outURL = pendingOutputURL
         let wasInstalled = tapInstalled
+        let lead: TimeInterval = {
+            guard let origin, let start = tapStartUptime else { return 0 }
+            return max(0, origin - start)
+        }()
+        tapStartUptime = nil
+        pauseIntervals = []
+        tapConverter = nil
         // Releasing the AVAudioFile flushes + closes the CAF output.
         recordingFile = nil
         pendingCAFURL = nil
@@ -261,15 +305,100 @@ final class SoundboardEngine: @unchecked Sendable {
         }
 
         guard let cafURL, let outURL else { return }
-        await Self.transcode(cafURL: cafURL, toM4A: outURL)
+        await Self.transcode(cafURL: cafURL, toM4A: outURL, leadingTrim: lead)
         try? FileManager.default.removeItem(at: cafURL)
     }
 
-    private func write(buffer: AVAudioPCMBuffer) {
+    /// Mirror the recording's pause state. Called alongside the capture
+    /// coordinator's pause/resume.
+    func setRecordingPaused(_ paused: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        tapLock.lock(); defer { tapLock.unlock() }
+        guard recordingFile != nil else { return }
+        if paused {
+            if pauseIntervals.last.map({ $0.end != nil }) ?? true {
+                pauseIntervals.append((now, nil))
+            }
+        } else if let last = pauseIntervals.last, last.end == nil {
+            pauseIntervals[pauseIntervals.count - 1].end = now
+        }
+    }
+
+    private func write(buffer: AVAudioPCMBuffer, when: AVAudioTime, installUptime: TimeInterval) {
         tapLock.lock(); defer { tapLock.unlock() }
         guard let file = recordingFile else { return }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return }
+        let rate = buffer.format.sampleRate
+        // Host time and systemUptime share mach_absolute_time's base.
+        let bufferStart = when.isHostTimeValid
+            ? AVAudioTime.seconds(forHostTime: when.hostTime)
+            : ProcessInfo.processInfo.systemUptime - Double(frames) / rate
+        if tapStartUptime == nil {
+            tapStartUptime = when.isHostTimeValid ? bufferStart : installUptime
+        }
+        // Drop exactly the frames that fall inside a pause — whole-buffer
+        // decisions would be off by up to a buffer (~85 ms) per pause.
+        for range in keptFrames(bufferStart: bufferStart, frames: frames, rate: rate) {
+            if range.count == frames {
+                writeToFile(buffer, file)
+            } else if let piece = buffer.copyFrames(range) {
+                writeToFile(piece, file)
+            }
+        }
+    }
+
+    private func keptFrames(bufferStart: TimeInterval, frames: Int, rate: Double) -> [Range<Int>] {
+        var kept: [Range<Int>] = [0..<frames]
+        for pause in pauseIntervals {
+            let lo = Int(((pause.start - bufferStart) * rate).rounded())
+            let hi = pause.end.map { Int((($0 - bufferStart) * rate).rounded()) } ?? frames
+            guard hi > 0, lo < frames, hi > lo else { continue }
+            kept = kept.flatMap { r -> [Range<Int>] in
+                let beforeEnd = min(r.upperBound, max(r.lowerBound, lo))
+                let afterStart = max(r.lowerBound, min(r.upperBound, hi))
+                return [r.lowerBound..<beforeEnd, afterStart..<r.upperBound].filter { !$0.isEmpty }
+            }
+        }
+        return kept
+    }
+
+    /// The mixer's format can change mid-recording — an output-device
+    /// switch (AirPods dropping to a lower sample rate) reconfigures the
+    /// graph — but the CAF keeps the format it was opened with, and
+    /// AVAudioFile rejects mismatched buffers. Convert when they differ.
+    private func writeToFile(_ buffer: AVAudioPCMBuffer, _ file: AVAudioFile) {
+        var output = buffer
+        if buffer.format != file.processingFormat {
+            if tapConverter?.inputFormat != buffer.format {
+                tapConverter = AVAudioConverter(from: buffer.format, to: file.processingFormat)
+            }
+            let ratio = file.processingFormat.sampleRate / buffer.format.sampleRate
+            let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 32
+            guard let converter = tapConverter,
+                  let converted = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: capacity) else {
+                MentorDebug.log("SOUNDBOARD: no converter for tap format change")
+                return
+            }
+            var supplied = false
+            var conversionError: NSError?
+            let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
+                if supplied {
+                    inputStatus.pointee = .noDataNow
+                    return nil
+                }
+                supplied = true
+                inputStatus.pointee = .haveData
+                return buffer
+            }
+            guard status != .error else {
+                MentorDebug.log("SOUNDBOARD: tap conversion failed: \(conversionError?.localizedDescription ?? "unknown")")
+                return
+            }
+            output = converted
+        }
         do {
-            try file.write(from: buffer)
+            try file.write(from: output)
         } catch {
             // Swallow — throwing from the audio thread would tear down
             // the tap.
@@ -283,7 +412,7 @@ final class SoundboardEngine: @unchecked Sendable {
     /// Uses AVAssetReader + AVAssetWriter — the same pattern
     /// `FinalRenderer` uses for its audio pump, so AAC encoder
     /// behaviour is consistent with the rest of the pipeline.
-    private static func transcode(cafURL: URL, toM4A m4aURL: URL) async {
+    private static func transcode(cafURL: URL, toM4A m4aURL: URL, leadingTrim: TimeInterval = 0) async {
         try? FileManager.default.removeItem(at: m4aURL)
 
         let asset = AVURLAsset(url: cafURL)
@@ -327,6 +456,10 @@ final class SoundboardEngine: @unchecked Sendable {
             return
         }
         reader.add(readerOutput)
+        let trimStart = CMTime(seconds: leadingTrim, preferredTimescale: 48_000)
+        if leadingTrim > 0 {
+            reader.timeRange = CMTimeRange(start: trimStart, duration: .positiveInfinity)
+        }
 
         let writer: AVAssetWriter
         do {
@@ -356,7 +489,9 @@ final class SoundboardEngine: @unchecked Sendable {
             MentorDebug.log("SOUNDBOARD: transcode reader.startReading failed: \(reader.error?.localizedDescription ?? "nil")")
             return
         }
-        writer.startSession(atSourceTime: .zero)
+        // Session starts at the trim point so the M4A's t=0 is the
+        // recording's time origin.
+        writer.startSession(atSourceTime: leadingTrim > 0 ? trimStart : .zero)
 
         let queue = DispatchQueue(label: "com.darrell.mentor.soundboard-transcode", qos: .userInitiated)
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -377,5 +512,25 @@ final class SoundboardEngine: @unchecked Sendable {
         if writer.status != .completed {
             MentorDebug.log("SOUNDBOARD: transcode failed — writer status \(writer.status.rawValue), error=\(writer.error?.localizedDescription ?? "nil")")
         }
+    }
+}
+
+private extension AVAudioPCMBuffer {
+    /// Copy of `range`'s frames in the same format. Works for interleaved
+    /// and non-interleaved PCM: `mBytesPerFrame` is per buffer, which is
+    /// one channel when non-interleaved and all channels when interleaved.
+    func copyFrames(_ range: Range<Int>) -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(range.count)) else {
+            return nil
+        }
+        copy.frameLength = AVAudioFrameCount(range.count)
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        let source = UnsafeMutableAudioBufferListPointer(mutableAudioBufferList)
+        let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        for (src, dst) in zip(source, destination) {
+            guard let from = src.mData, let to = dst.mData else { return nil }
+            memcpy(to, from + range.lowerBound * bytesPerFrame, range.count * bytesPerFrame)
+        }
+        return copy
     }
 }

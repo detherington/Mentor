@@ -6,10 +6,10 @@ import Foundation
 import Vision
 
 /// Processing mode for the webcam's background. Person segmentation
-/// comes from Core Image's built-in `CIPersonSegmentation` filter,
-/// which returns a per-pixel mask (person=1, background=0). The
-/// compositor uses that mask to keep the subject sharp while replacing
-/// or blurring whatever's behind them.
+/// comes from Vision (`WebcamBackgroundProcessor`), which returns a
+/// per-pixel mask (person=1, background=0). The compositor uses that
+/// mask to keep the subject sharp while replacing or blurring whatever's
+/// behind them.
 enum WebcamBackgroundMode: String, Codable, Equatable, CaseIterable, Identifiable {
     /// Pass-through — no segmentation, compositor uses the raw webcam
     /// frame (current default behaviour).
@@ -77,12 +77,24 @@ struct WebcamBackgroundStyle: Codable, Equatable, Sendable {
 /// the whole frame read as "background" and the entire webcam gets
 /// blurred/replaced. `VNGeneratePersonSegmentationRequest` is the
 /// supported on-device path on macOS and produces a real mask.
-enum WebcamBackgroundProcessor {
+///
+/// One instance per compositor, called only from its serial render
+/// queue: the segmentation request and `VNSequenceRequestHandler` are
+/// reused across frames (they used to be rebuilt per frame), and the
+/// sequence handler lets Vision carry state between consecutive frames.
+final class WebcamBackgroundProcessor {
+    private let request: VNGeneratePersonSegmentationRequest = {
+        let r = VNGeneratePersonSegmentationRequest()
+        r.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        return r
+    }()
+    private let sequenceHandler = VNSequenceRequestHandler()
+
     /// Returns the processed image, or the input unchanged when
     /// segmentation is off / fails. Never throws — if anything goes
     /// wrong we silently pass-through so the webcam overlay still
     /// renders (degraded rather than missing).
-    static func apply(
+    func apply(
         to image: CIImage,
         style: WebcamBackgroundStyle
     ) -> CIImage {
@@ -144,11 +156,10 @@ enum WebcamBackgroundProcessor {
         return blended.cropped(to: image.extent)
     }
 
-    /// Run `VNGeneratePersonSegmentationRequest` synchronously on the
-    /// given image and return a CIImage wrapping the mask pixel
-    /// buffer. Returns nil on any Vision failure.
-    private static func personMask(for image: CIImage, quality: Int) -> CIImage? {
-        let request = VNGeneratePersonSegmentationRequest()
+    /// Run the segmentation request synchronously on the given image and
+    /// return a CIImage wrapping the mask pixel buffer. Returns nil on
+    /// any Vision failure.
+    private func personMask(for image: CIImage, quality: Int) -> CIImage? {
         // Vision's quality tiers — map our int (same semantics as the
         // old CIFilter field so user settings persist cleanly):
         //   0 = accurate (slowest, cleanest hair edges)
@@ -159,11 +170,9 @@ enum WebcamBackgroundProcessor {
         case 1: request.qualityLevel = .balanced
         default: request.qualityLevel = .fast
         }
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
 
-        let handler = VNImageRequestHandler(ciImage: image, options: [:])
         do {
-            try handler.perform([request])
+            try sequenceHandler.perform([request], on: image)
         } catch {
             return nil
         }

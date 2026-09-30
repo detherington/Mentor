@@ -6,12 +6,16 @@ options:
   createIntermediateGroups: true
   groupSortPosition: top
 
-# Sparkle — auto-update framework. Appcast + DMG artifacts live in
-# GitHub Releases for this repo; see README for the release workflow.
+# Sparkle — auto-update framework. Releases are served by Orbis from
+# https://sbsorbis.com/download/mentor/ (appcast, update zips, DMGs),
+# the same way Muesli ships. See README for the release workflow. Pinned exactly: `from:` let each clean build resolve
+# whatever Sparkle was newest that day (Package.resolved isn't
+# committed), so two builds of the same commit could ship different
+# updaters. Bump deliberately.
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    from: "2.6.0"
+    exactVersion: "2.9.1"
 
 settings:
   base:
@@ -25,6 +29,13 @@ settings:
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Developer ID Application"
     DEVELOPMENT_TEAM: "8B29CDK832"
+    # Bump MARKETING_VERSION for each release. scripts/release.sh
+    # overrides CURRENT_PROJECT_VERSION with a UTC timestamp
+    # (YYYYMMDDHHMM): Sparkle orders updates by it, and the Orbis
+    # download page picks the newest release by comparing it as text,
+    # so every release build number must be that same fixed width.
+    MARKETING_VERSION: "1.2.0"
+    CURRENT_PROJECT_VERSION: "1"
 
 targets:
   Mentor:
@@ -52,10 +63,8 @@ targets:
       path: Mentor/Resources/Info.plist
       properties:
         CFBundleDisplayName: Mentor
-        # Bumped on every release. `build-dmg.sh` reads these from
-        # Info.plist and threads them through the appcast entry.
-        CFBundleShortVersionString: "1.1.1"
-        CFBundleVersion: "14"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
         NSCameraUsageDescription: Mentor records your webcam to overlay it on screen recordings.
         NSMicrophoneUsageDescription: Mentor records your microphone for narration.
@@ -63,9 +72,10 @@ targets:
         LSApplicationCategoryType: public.app-category.video
         NSHumanReadableCopyright: © 2026 Darrell Etherington
         # ---- Sparkle auto-update ----------------------------------
-        # Appcast feed hosted via a GitHub raw URL (private-repo-
-        # friendly). Swap to the repo's actual path after `git push`.
-        SUFeedURL: "https://raw.githubusercontent.com/detherington/Mentor/main/appcast.xml"
+        # Appcast feed, public on Orbis (Sparkle can't sign in). Copies
+        # up to 1.1.1 still poll the legacy appcast.xml on GitHub main,
+        # which carries one bridge item to the first Orbis release.
+        SUFeedURL: "https://sbsorbis.com/download/mentor/appcast.xml"
         # EdDSA public key for verifying update signatures. Generated
         # once with Sparkle's `generate_keys`; the private key stays in
         # the developer's keychain. If you ever rotate, replace this
@@ -89,15 +99,6 @@ targets:
             UTTypeTagSpecification:
               public.filename-extension:
                 - mentor
-        # Custom URL scheme used by the Orbis integration's
-        # auth callback: Orbis's PAT page redirects the user back
-        # to `mentor://orbis-token?token=…&user=…` after they create
-        # a Personal Access Token for Mentor. AppDelegate captures the
-        # query and stashes the token in the Keychain.
-        CFBundleURLTypes:
-          - CFBundleURLName: com.darrell.mentor.orbis-token
-            CFBundleURLSchemes:
-              - mentor
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.darrell.mentor

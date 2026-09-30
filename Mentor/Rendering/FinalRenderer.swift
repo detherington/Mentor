@@ -40,7 +40,7 @@ enum FinalRenderer {
 
     /// Run `body` inside a guarded "render is in flight" window so
     /// only one encoder pass is live at a time.
-    private static func withRenderLock<T>(_ body: () async throws -> T) async rethrows -> T {
+    private static func withRenderLock<T>(_ body: () async throws -> T) async throws -> T {
         // Busy-wait with a short sleep rather than a continuation
         // queue — we don't expect contention to be common (auto-
         // render happens serially after recording ends, and editor
@@ -54,7 +54,14 @@ enum FinalRenderer {
                 break
             }
             renderLock.unlock()
-            try? await Task.sleep(nanoseconds: 50_000_000)  // 50 ms
+            // `try?` here used to swallow CancellationError — a
+            // cancelled waiter's sleep returns immediately, so the loop
+            // spun at full CPU until the other render finished.
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)  // 50 ms
+            } catch {
+                throw RenderError.cancelled
+            }
         }
         defer {
             renderLock.lock()
@@ -64,121 +71,40 @@ enum FinalRenderer {
         return try await body()
     }
 
-    /// Webcam-overlay parameters used by the renderer. Independent of the
-    /// capture-time metadata, so the editor can pass user-modified layouts.
+    /// What an export renders: the overlay (in source time — the renderer
+    /// remaps it when there are cuts) plus export-only options.
+    /// Independent of the capture-time metadata, so the editor can pass
+    /// user-modified layouts.
     struct ExportLayout {
-        let position: WebcamPosition
-        let shape: WebcamShape
-        let diameterPixels: CGFloat
-        let insetPixels: CGFloat
-        let zoomKeyframes: [ZoomKeyframe]
-        let webcamTransitions: WebcamTransitions
-        let startCard: TitleCard
-        let endCard: TitleCard
-        let cursorRipples: [CursorRipple]
-        let cursorRippleStyle: CursorRippleStyle
-        let talkingHeadKeyframes: [TalkingHeadKeyframe]
+        var overlay: OverlaySettings
         /// Target video bitrate in bits/sec. Defaults to the "high"
         /// preset to match the original hard-coded value.
-        let videoBitrate: Int
+        var videoBitrate: Int = ExportQuality.high.bitrate
         /// Per-track volumes applied via `AVAudioMix` at export time.
         /// Unity preserves the original recording mix.
-        let audioMixVolumes: AudioMixBuilder.Volumes
-        /// Subtitle lines + styling. Empty `transcriptionLines` or
-        /// `captionStyle.enabled == false` → no captions baked into the
-        /// export.
-        let transcriptionLines: [TranscriptionLine]
-        let captionStyle: CaptionStyle
-
-        /// Keystroke overlay chips + styling. Empty chips or
-        /// `keystrokeOverlayStyle.enabled == false` → no overlay in the
-        /// export.
-        let keystrokeChips: [KeystrokeChip]
-        let keystrokeOverlayStyle: KeystrokeOverlayStyle
-
-        /// Cursor-highlight halo track + styling. Empty track or
-        /// `cursorHighlightStyle.enabled == false` → no halo baked in.
-        let cursorTrack: CursorHighlightTrack
-        let cursorHighlightStyle: CursorHighlightStyle
-
-        /// Webcam background processing (blur / color). Off → raw
-        /// webcam goes through unchanged.
-        let webcamBackgroundStyle: WebcamBackgroundStyle
-
+        var audioMixVolumes: AudioMixBuilder.Volumes = .unity
         /// Optional replacement URL for the mic track. When non-nil
         /// and the file exists, the export composition uses this
         /// instead of `bundle.micAudioURL` — noise-reduction cleaned
         /// audio is fed in via this hook.
-        let micOverrideURL: URL?
+        var micOverrideURL: URL?
+        /// When true and there are caption lines, the renderer writes a
+        /// `.srt` sidecar next to the exported MP4. The SRT's timestamps
+        /// are the post-trim, post-cut output times so they line up with
+        /// the MP4's timeline — not the original recording's.
+        var writeSRTSidecar: Bool = false
 
-        /// When true and `transcriptionLines` is non-empty, the
-        /// renderer writes a `.srt` sidecar next to the exported MP4.
-        /// The SRT's timestamps are the post-trim, post-cut output
-        /// times so they line up with the MP4's timeline — not the
-        /// original recording's.
-        let writeSRTSidecar: Bool
-
-        init(
-            position: WebcamPosition,
-            shape: WebcamShape,
-            diameterPixels: CGFloat,
-            insetPixels: CGFloat,
-            zoomKeyframes: [ZoomKeyframe] = [],
-            webcamTransitions: WebcamTransitions = .default,
-            startCard: TitleCard = .defaultStart,
-            endCard: TitleCard = .defaultEnd,
-            cursorRipples: [CursorRipple] = [],
-            cursorRippleStyle: CursorRippleStyle = .default,
-            talkingHeadKeyframes: [TalkingHeadKeyframe] = [],
-            videoBitrate: Int = ExportQuality.high.bitrate,
-            audioMixVolumes: AudioMixBuilder.Volumes = .unity,
-            transcriptionLines: [TranscriptionLine] = [],
-            captionStyle: CaptionStyle = .default,
-            keystrokeChips: [KeystrokeChip] = [],
-            keystrokeOverlayStyle: KeystrokeOverlayStyle = .default,
-            cursorTrack: CursorHighlightTrack = .empty,
-            cursorHighlightStyle: CursorHighlightStyle = .default,
-            webcamBackgroundStyle: WebcamBackgroundStyle = .default,
-            micOverrideURL: URL? = nil,
-            writeSRTSidecar: Bool = false
-        ) {
-            self.position = position
-            self.shape = shape
-            self.diameterPixels = diameterPixels
-            self.insetPixels = insetPixels
-            self.zoomKeyframes = zoomKeyframes
-            self.webcamTransitions = webcamTransitions
-            self.startCard = startCard
-            self.endCard = endCard
-            self.cursorRipples = cursorRipples
-            self.cursorRippleStyle = cursorRippleStyle
-            self.talkingHeadKeyframes = talkingHeadKeyframes
-            self.videoBitrate = videoBitrate
-            self.audioMixVolumes = audioMixVolumes
-            self.transcriptionLines = transcriptionLines
-            self.captionStyle = captionStyle
-            self.keystrokeChips = keystrokeChips
-            self.keystrokeOverlayStyle = keystrokeOverlayStyle
-            self.cursorTrack = cursorTrack
-            self.cursorHighlightStyle = cursorHighlightStyle
-            self.webcamBackgroundStyle = webcamBackgroundStyle
-            self.micOverrideURL = micOverrideURL
-            self.writeSRTSidecar = writeSRTSidecar
-        }
-
+        /// The capture-time webcam layout; everything else at defaults
+        /// (the post-capture auto-render never adds title cards).
         static func fromCaptureMetadata(_ metadata: RecordingMetadata) -> ExportLayout {
             let layout = metadata.webcamLayout
             let backingScale = CGFloat(metadata.backingScale ?? 2.0)
-            return ExportLayout(
-                position: WebcamPosition(rawValue: layout.position) ?? .bottomRight,
-                shape: WebcamShape(rawValue: layout.shape) ?? .circle,
-                diameterPixels: CGFloat(layout.diameterPoints) * backingScale,
-                insetPixels: CGFloat(layout.insetPoints) * backingScale,
-                zoomKeyframes: []
-                // webcamTransitions defaults to fade-in/out (.default)
-                // startCard / endCard default to disabled — auto post-
-                // capture render never adds title cards.
-            )
+            var overlay = OverlaySettings()
+            overlay.position = WebcamPosition(rawValue: layout.position) ?? .bottomRight
+            overlay.shape = WebcamShape(rawValue: layout.shape) ?? .circle
+            overlay.diameter = CGFloat(layout.diameterPoints) * backingScale
+            overlay.inset = CGFloat(layout.insetPoints) * backingScale
+            return ExportLayout(overlay: overlay)
         }
     }
 
@@ -240,63 +166,27 @@ enum FinalRenderer {
         // throughout — no reader.timeRange trimming needed, and the
         // compositor sees frames at their final output PTS.
         //
-        // Keyframes, captions and cursor ripples live in source time, so
-        // they get remapped through the TrimMap before being handed to
-        // the compositor. The compositor itself treats the incoming
-        // trimMap as an identity span over `stitchedDuration`.
+        // The overlay lives in source time, so with cuts it's remapped
+        // onto the stitched timeline before being handed to the
+        // compositor, which then treats its trimMap as an identity span
+        // over the stitched duration.
         let composition: EditorComposition.Result
         let compositorMap: TrimMap
-        let renderKeyframes: [ZoomKeyframe]
-        let renderTalkingHeads: [TalkingHeadKeyframe]
-        let renderRipples: [CursorRipple]
-        let renderCaptions: [TranscriptionLine]
-        let renderKeystrokes: [KeystrokeChip]
-        let renderCursorTrack: CursorHighlightTrack
-
+        let overlay: OverlaySettings
         if effectiveMap.cuts.isEmpty {
             composition = sourceComp
             compositorMap = effectiveMap
-            renderKeyframes = layout.zoomKeyframes
-            renderTalkingHeads = layout.talkingHeadKeyframes
-            renderRipples = layout.cursorRipples
-            renderCaptions = layout.transcriptionLines
-            renderKeystrokes = layout.keystrokeChips
-            renderCursorTrack = layout.cursorTrack
+            overlay = layout.overlay
         } else {
             composition = try EditorComposition.stitched(source: sourceComp, trimMap: effectiveMap)
             compositorMap = .entire(CMTimeRange(start: .zero, duration: composition.duration))
-            renderKeyframes = effectiveMap.remap(zoomKeyframes: layout.zoomKeyframes)
-            renderTalkingHeads = effectiveMap.remap(talkingHeadKeyframes: layout.talkingHeadKeyframes)
-            renderRipples = effectiveMap.remap(cursorRipples: layout.cursorRipples)
-            renderCaptions = effectiveMap.remap(transcriptionLines: layout.transcriptionLines)
-            renderKeystrokes = effectiveMap.remap(keystrokeChips: layout.keystrokeChips)
-            renderCursorTrack = effectiveMap.remap(cursorTrack: layout.cursorTrack)
+            overlay = layout.overlay.remapped(by: effectiveMap)
         }
 
         // Write to THIS render's own composition state — independent
         // of any editor session running concurrently on the same
         // bundle.
-        composition.compositorState.update(
-            position: layout.position,
-            shape: layout.shape,
-            diameter: layout.diameterPixels,
-            inset: layout.insetPixels,
-            zoomKeyframes: renderKeyframes,
-            webcamTransitions: layout.webcamTransitions,
-            startCard: layout.startCard,
-            endCard: layout.endCard,
-            trimMap: compositorMap,
-            cursorRipples: renderRipples,
-            cursorRippleStyle: layout.cursorRippleStyle,
-            talkingHeadKeyframes: renderTalkingHeads,
-            transcriptionLines: renderCaptions,
-            captionStyle: layout.captionStyle,
-            keystrokeChips: renderKeystrokes,
-            keystrokeOverlayStyle: layout.keystrokeOverlayStyle,
-            cursorTrack: renderCursorTrack,
-            cursorHighlightStyle: layout.cursorHighlightStyle,
-            webcamBackgroundStyle: layout.webcamBackgroundStyle
-        )
+        composition.compositorState.set(overlay, trimMap: compositorMap)
         let audioMix = AudioMixBuilder.build(
             composition: composition.composition,
             micTrackID: composition.micTrackID,
@@ -331,8 +221,8 @@ enum FinalRenderer {
         // transcription to emit. Always run source→output remap so
         // the timestamps line up with the MP4 regardless of whether
         // we took the stitched or straight-reader path above.
-        if layout.writeSRTSidecar, !layout.transcriptionLines.isEmpty {
-            let srtLines = effectiveMap.remap(transcriptionLines: layout.transcriptionLines)
+        if layout.writeSRTSidecar, !layout.overlay.transcriptionLines.isEmpty {
+            let srtLines = effectiveMap.remap(transcriptionLines: layout.overlay.transcriptionLines)
             if !srtLines.isEmpty {
                 let srtURL = writtenURL
                     .deletingPathExtension()
@@ -362,14 +252,8 @@ enum FinalRenderer {
         // Loom-style automatic polish without having to open the editor.
         let (keyframes, ripples) = await autoEventDerivatives(bundle: bundle, metadata: metadata)
         var layout = ExportLayout.fromCaptureMetadata(metadata)
-        layout = ExportLayout(
-            position: layout.position,
-            shape: layout.shape,
-            diameterPixels: layout.diameterPixels,
-            insetPixels: layout.insetPixels,
-            zoomKeyframes: keyframes,
-            cursorRipples: ripples
-        )
+        layout.overlay.zoomKeyframes = keyframes
+        layout.overlay.cursorRipples = ripples
         return try await render(
             bundle: bundle,
             metadata: metadata,
@@ -561,31 +445,63 @@ enum FinalRenderer {
         let progressOrigin = sessionStart
 
         // Pump video + audio concurrently; return only after both finish.
-        async let videoDone: Void = pumpVideo(
-            input: videoWriterInput,
-            output: videoReaderOutput,
-            queue: videoQueue,
-            totalSeconds: totalSeconds,
-            progressOrigin: progressOrigin,
-            progress: progress
-        )
-        async let audioDone: Void = {
-            if let audioWriterInput, let audioReaderOutput {
-                await pumpAudio(input: audioWriterInput, output: audioReaderOutput, queue: audioQueue)
+        // `onCancel` is the only reliable cancel signal — see PumpControl.
+        let control = PumpControl()
+        await withTaskCancellationHandler {
+            async let videoDone: Void = pump(
+                input: videoWriterInput,
+                output: videoReaderOutput,
+                writer: writer,
+                queue: videoQueue,
+                control: control
+            ) { sample in
+                guard let progress else { return }
+                let t = CMSampleBufferGetPresentationTimeStamp(sample)
+                let elapsed = CMTimeSubtract(t, progressOrigin)
+                progress(Float(min(1.0, max(0.0, CMTimeGetSeconds(elapsed) / totalSeconds))))
             }
-        }()
-
-        _ = await (videoDone, audioDone)
+            async let audioDone: Void = {
+                if let audioWriterInput, let audioReaderOutput {
+                    await pump(
+                        input: audioWriterInput,
+                        output: audioReaderOutput,
+                        writer: writer,
+                        queue: audioQueue,
+                        control: control
+                    )
+                }
+            }()
+            _ = await (videoDone, audioDone)
+        } onCancel: {
+            control.abort()
+        }
 
         // ---- Finish
+        // Anything other than "both pumps drained a healthy reader into a
+        // still-writing writer" is a failure. Previously a reader failure
+        // (e.g. the compositor couldn't get a pixel buffer) surfaced as a
+        // nil sample, was treated as end-of-file, and shipped a silently
+        // truncated MP4. `finishWriting` is only legal while `.writing`.
+        let cancelled = Task.isCancelled
+        let readerFailed = reader.status == .failed
+        if cancelled || readerFailed || writer.status != .writing {
+            let readerError = reader.error
+            if reader.status == .reading { reader.cancelReading() }
+            if writer.status == .writing { writer.cancelWriting() }
+            try? FileManager.default.removeItem(at: outputURL)
+            if cancelled { throw RenderError.cancelled }
+            if let writerError = writer.error {
+                throw RenderError.exportFailed("writer error: \(writerError.localizedDescription)")
+            }
+            if readerFailed {
+                throw RenderError.exportFailed("reader error: \(readerError?.localizedDescription ?? "unknown")")
+            }
+            throw RenderError.exportFailed("writer status: \(writer.status.rawValue)")
+        }
+
         await writer.finishWriting()
         if reader.status != .completed && reader.status != .cancelled {
             reader.cancelReading()
-        }
-
-        if Task.isCancelled {
-            try? FileManager.default.removeItem(at: outputURL)
-            throw RenderError.cancelled
         }
 
         if let writerError = writer.error {
@@ -597,70 +513,103 @@ enum FinalRenderer {
         return outputURL
     }
 
-    private static func pumpVideo(
+    /// Drain one reader output into one writer input. Video and audio
+    /// used to have near-identical copies of this; the only difference
+    /// was video's progress callback, now `onSample`.
+    private static func pump(
         input: AVAssetWriterInput,
-        output: AVAssetReaderVideoCompositionOutput,
+        output: AVAssetReaderOutput,
+        writer: AVAssetWriter,
         queue: DispatchQueue,
-        totalSeconds: Double,
-        progressOrigin: CMTime,
-        progress: ((Float) -> Void)?
+        control: PumpControl,
+        onSample: ((CMSampleBuffer) -> Void)? = nil
     ) async {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                input.requestMediaDataWhenReady(on: queue) {
-                    while input.isReadyForMoreMediaData {
-                        if Task.isCancelled {
-                            input.markAsFinished()
-                            cont.resume()
-                            return
-                        }
-                        if let sample = output.copyNextSampleBuffer() {
-                            input.append(sample)
-                            if let progress {
-                                let t = CMSampleBufferGetPresentationTimeStamp(sample)
-                                let elapsed = CMTimeSubtract(t, progressOrigin)
-                                let fraction = Float(min(1.0, max(0.0, CMTimeGetSeconds(elapsed) / totalSeconds)))
-                                progress(fraction)
-                            }
-                        } else {
-                            input.markAsFinished()
-                            cont.resume()
-                            return
-                        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            guard let id = control.register(cont) else { return }
+            input.requestMediaDataWhenReady(on: queue) {
+                while input.isReadyForMoreMediaData {
+                    if control.isAborted {
+                        control.finish(id)
+                        return
                     }
+                    guard let sample = output.copyNextSampleBuffer() else {
+                        // End of range — or a reader failure, which the
+                        // caller distinguishes via `reader.status`.
+                        input.markAsFinished()
+                        control.finish(id)
+                        return
+                    }
+                    guard input.append(sample) else {
+                        // Writer failed. AVFoundation stops calling
+                        // *both* inputs' blocks after this, so abort
+                        // wakes the other pump too.
+                        control.abort()
+                        return
+                    }
+                    onSample?(sample)
+                }
+                // Not ready — normally backpressure, and we'll be called
+                // again. But a writer that failed without an append
+                // returning false (async encoder error) never calls back.
+                if writer.status == .failed {
+                    control.abort()
                 }
             }
-        } onCancel: {
-            // Nothing to do synchronously — the pump loop polls Task.isCancelled.
         }
     }
+}
 
-    private static func pumpAudio(
-        input: AVAssetWriterInput,
-        output: AVAssetReaderAudioMixOutput,
-        queue: DispatchQueue
-    ) async {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                input.requestMediaDataWhenReady(on: queue) {
-                    while input.isReadyForMoreMediaData {
-                        if Task.isCancelled {
-                            input.markAsFinished()
-                            cont.resume()
-                            return
-                        }
-                        if let sample = output.copyNextSampleBuffer() {
-                            input.append(sample)
-                        } else {
-                            input.markAsFinished()
-                            cont.resume()
-                            return
-                        }
-                    }
-                }
-            }
-        } onCancel: {
-            // See above.
+/// Out-of-band stop signal shared by the video + audio pumps.
+///
+/// `requestMediaDataWhenReady` blocks run on GCD queues outside any
+/// Task, so `Task.isCancelled` inside them is always false — the old
+/// cancel check never fired and a cancelled export ran to completion.
+/// Worse, once the writer fails AVFoundation stops invoking the blocks,
+/// so a pump parked on its continuation would wait forever while
+/// holding the render lock, wedging every later render (including the
+/// post-recording auto-bake). Cancel or a failed append calls `abort()`,
+/// which resumes every pending pump exactly once.
+private final class PumpControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var aborted = false
+    private var pending: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var nextID = 0
+
+    var isAborted: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return aborted
+    }
+
+    /// Returns nil (and resumes immediately) if already aborted — the
+    /// cancel handler can fire before a pump has registered.
+    func register(_ cont: CheckedContinuation<Void, Never>) -> Int? {
+        lock.lock()
+        if aborted {
+            lock.unlock()
+            cont.resume()
+            return nil
         }
+        let id = nextID
+        nextID += 1
+        pending[id] = cont
+        lock.unlock()
+        return id
+    }
+
+    /// Normal completion. No-op if `abort()` already resumed this pump.
+    func finish(_ id: Int) {
+        lock.lock()
+        let cont = pending.removeValue(forKey: id)
+        lock.unlock()
+        cont?.resume()
+    }
+
+    func abort() {
+        lock.lock()
+        aborted = true
+        let conts = Array(pending.values)
+        pending.removeAll()
+        lock.unlock()
+        conts.forEach { $0.resume() }
     }
 }

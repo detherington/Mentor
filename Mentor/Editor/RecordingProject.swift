@@ -14,14 +14,8 @@ struct RecordingProject {
     let transcription: TranscriptionLog?
     let cursorLog: CursorSampler.Log?
 
-    var screenVideoURL: URL { bundleURL.appendingPathComponent("screen.mov") }
-    var webcamVideoURL: URL { bundleURL.appendingPathComponent("webcam.mov") }
-    var eventsURL: URL { bundleURL.appendingPathComponent("events.json") }
-    var soundboardEventsURL: URL { bundleURL.appendingPathComponent("soundboard-events.json") }
-    var talkingHeadURL: URL { bundleURL.appendingPathComponent("talking-head.json") }
-    var zoomURL: URL { bundleURL.appendingPathComponent("zoom.json") }
-    var transcriptionURL: URL { bundleURL.appendingPathComponent("transcription.json") }
-    var metadataURL: URL { bundleURL.appendingPathComponent("metadata.json") }
+    // Sidecar file URLs live on `bundle` (`RecordingBundle`) — one
+    // source of truth for the layout.
 
     var displayName: String {
         bundleURL.deletingPathExtension().lastPathComponent

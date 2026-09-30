@@ -11,19 +11,23 @@ teleprompter, soundboard). Swift + AppKit + SwiftUI, ScreenCaptureKit for
 screen, AVFoundation for camera/mic, custom `AVVideoCompositing` for
 compositing, Sparkle for auto-update.
 
-Distribution: Developer-ID-signed, notarized DMG hosted on GitHub Releases.
-Auto-update via Sparkle appcast at `appcast.xml` on `main`. LSUIElement app
+Distribution: same model as Muesli. Orbis serves releases from
+`https://sbsorbis.com/download/mentor/` (Sparkle appcast + update zips +
+DMGs); its Mentor download page links the newest DMG. The `appcast.xml`
+in this repo is a legacy feed for copies up to 1.1.1. LSUIElement app
 (menu-bar only by default; promotes to `.regular` activation when an editor
 window opens, demotes back on last-editor close).
 
 Single-maintainer project; ship cadence is "whenever a feature's ready."
-Version is `CFBundleShortVersionString` in `project.yml` — currently 1.0.8.
+Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.0. The
+build number (`CURRENT_PROJECT_VERSION`) is a UTC `YYYYMMDDHHMM`
+timestamp set by the release script; the last GitHub-era build was 14.
 
 ## Source of truth is `project.yml`
 
 **The `.xcodeproj` is gitignored and regenerated from `project.yml` via
 XcodeGen on every release build.** Do not edit `project.pbxproj` expecting
-changes to persist — they'll be wiped by `build-dmg.sh`'s xcodegen step.
+changes to persist — they'll be wiped by `scripts/release.sh`'s xcodegen step.
 If you add a new Swift file, it should be picked up automatically by the
 `sources: [path: Mentor]` rule; you only need to touch `project.yml` to
 add a new top-level folder, framework dep, or Info.plist key.
@@ -31,7 +35,7 @@ add a new top-level folder, framework dep, or Info.plist key.
 That said, when iterating locally during a session, the current pbxproj
 may have been edited by hand (e.g. to add a file that didn't exist yet)
 — rebuilding with `xcodebuild` uses whatever's on disk. A regeneration
-only happens during `./build-dmg.sh`.
+only happens during `scripts/release.sh`.
 
 ## Build / run / ship
 
@@ -39,8 +43,9 @@ only happens during `./build-dmg.sh`.
 | --- | --- |
 | Debug build | `xcodebuild -project Mentor.xcodeproj -scheme Mentor -configuration Debug -destination 'platform=macOS' build` |
 | Launch dev build | `pkill -x Mentor; open <DerivedData>/Build/Products/Debug/Mentor.app` |
-| Regenerate xcodeproj | `.local/bin/xcodegen generate` |
-| Ship a release | `./build-dmg.sh` (see "Release workflow" below) |
+| Regenerate xcodeproj | `xcodegen generate` (Homebrew, or `.local/bin/` via `scripts/bootstrap.sh`) |
+| Pre-release checks only | `scripts/release.sh --check` |
+| Ship a release | `scripts/release.sh`, upload, `scripts/release.sh --verify` (see "Release workflow") |
 
 There are no unit tests in this repo — validation is manual ("smoke-test a
 recording, confirm the .mp4 renders and the editor opens it"). Don't
@@ -69,7 +74,7 @@ visible jitter on M4-base; one live encoder per raw track is fine.
 ~/Movies/Mentor/
 ├── Mentor_<timestamp>.mp4            composited final (shareable)
 └── Mentor_<timestamp>.mentor/        sidecar bundle (editable)
-    ├── screen.mov                    H.264 Baseline, 60fps, frame-reordering off
+    ├── screen.mov                    H.264 High, 60fps, frame-reordering off
     ├── webcam.mov                    H.264, 30fps
     ├── mic.m4a                       AAC
     ├── system.m4a                    AAC (optional)
@@ -79,31 +84,35 @@ visible jitter on M4-base; one live encoder per raw track is fine.
     ├── cursor.json                   30 Hz mouse-location samples
     ├── talking-head.json             manual talking-head moments
     ├── zoom.json                     zoom keyframes (auto + edited)
-    ├── title-cards.json              title card layout
-    ├── teleprompter.json             script + settings
+    ├── edit-state.json               editor look: trim, cuts, webcam, title cards, styles
     ├── transcription.json            on-device SpeechAnalyzer output
+    ├── mic_cleaned.caf               noise-reduced mic (editor, on demand)
     └── metadata.json                 source info, webcam layout, dims
 ```
+
+The teleprompter script is app-wide (UserDefaults), not per-recording.
 
 ### CaptureCoordinator is the central hub
 
 `Mentor/Capture/CaptureCoordinator.swift` owns: ScreenCapture (SCStream),
-CameraCapture (AVCaptureSession), all writers, event/cursor recorders,
-soundboard reference, pause state. Sample handlers live on the
-`ScreenCaptureDelegate` / `CameraCaptureDelegate` extensions and are the
-hot path — any work done here has to be lock-safe and fast.
+CameraCapture (AVCaptureSession), the current `RecordingSession` (the
+four `TrackWriter`s, event/cursor recorders, bundle, metadata — installed
+and torn down as one value), the `PauseClock`, and the soundboard
+reference. Sample handlers live on the `ScreenCaptureDelegate` /
+`CameraCaptureDelegate` extensions and are the hot path — any work done
+here has to be lock-safe and fast.
 
-Three locks, never hold more than one at a time:
-- `pipelineLock` — mutates `screenRawWriter` / `webcamRawWriter` / etc.
-- `pauseLock` — `_isPaused`, `_pauseStart`, `_cumulativePauseOffset`
-- `stateLock` — `_isRecording`
+Locks — never hold more than one at a time:
+- `pipelineLock` — the `session`
+- `PauseClock`'s own lock — pause state + the recording's time origin
+- `stateLock` — `_isRecording` / `_isStarting` / interruption flag
 - `coordStatsLock` — telemetry counters
 - `observerLock` — `_cameraFrameObserver` closure
 - `micTapLock` — `_micSampleSink` closure
 
 The sample-handler pattern is: grab a snapshot under the lock, release,
-then do the actual work. See `pauseStateForSample()` for the canonical
-form.
+then do the actual work — e.g. take `session?.screen` under
+`pipelineLock`, then `clock.sampleState(…)`, then append.
 
 ### Pause/resume retiming
 
@@ -119,19 +128,22 @@ so their JSON logs stay aligned with retimed video.
 
 `Mentor/Editor/LiveCompositor.swift` is an `AVVideoCompositing`
 implementation that drives **both** the live editor preview and the
-`FinalRenderer` export pass. A shared `State` singleton holds all overlay
-parameters (webcam layout, zoom keyframes, talking-head keyframes, title
-cards, cursor ripples, audio range). The editor writes to it on inspector
-changes; the compositor reads per frame.
+`FinalRenderer` export pass. Each composition owns its own
+`LiveCompositor.State` (there is no shared singleton any more) holding
+all overlay parameters (webcam layout, zoom keyframes, talking-head
+keyframes, title cards, cursor ripples, audio range). The editor writes
+to its composition's `State` on inspector changes; the compositor reads
+per frame.
 
 Per-frame order: screen → cursor ripples → smart zoom → webcam (with
-fade + talking-head interpolation) → title cards → keystroke overlays.
+fade + talking-head interpolation) → title cards → captions → keystroke overlays.
 
-**Watch out:** the singleton is a race hazard. The editor and
-`FinalRenderer`'s background render can both try to write to it
-simultaneously. `FinalRenderer.isRendering` + `renderLock` guards
-against this — the editor's `applyLayout` checks **both**
-`isExporting` and `FinalRenderer.isRendering` before writing.
+**Watch out:** an editor-initiated export reads the editor's own
+`State`, so `applyLayout` bails while `isExporting` is true. Separately,
+`FinalRenderer` serialises renders with a private `renderLock` /
+`_isRendering` pair — not for state safety, but so the post-recording
+auto-bake and an editor export never run two full-rate HW encoders at
+once.
 
 ### Time base convention
 
@@ -145,12 +157,13 @@ the same time base the editor uses for seeking. Don't mix wall-clock
 
 | Folder | Responsibility |
 | --- | --- |
-| `Mentor/App/` | `AppDelegate` (entry point, Apple Event handling, activation-policy flipping), `MenuBarController`, `MentorDebug` log |
-| `Mentor/Capture/` | `CaptureCoordinator`, `ScreenCapture` (SCStream), `CameraCapture` (AVCaptureSession), `CaptureContention` (detect Granola/Wispr/etc holding the mic), `SampleBufferRetiming` |
-| `Mentor/Recording/` | Raw + audio writers, `EventRecorder`, `CursorSampler`, `RecordingBundle` layout, `TeleprompterController` |
+| `Mentor/App/` | `AppDelegate` (entry point + wiring, shortcuts, quit), `RecordingFlowController` (picker → countdown → record → stop state machine, post-recording render), `EditorWindowManager` (editor windows + activation-policy flipping), `CaptureDeviceMonitor` (camera/mic permissions, hot-plug), `OpenURLRouter` (open-file Apple Events, duplicate-instance hand-off), `MainMenu`, `MenuBarController`, `MentorDebug` log |
+| `Mentor/Capture/` | `CaptureCoordinator`, `PauseClock`, `ScreenCapture` (SCStream), `CameraCapture` (AVCaptureSession), `CaptureContention` (detect Granola/Wispr/etc holding the mic), `SampleBufferRetiming` |
+| `Mentor/Recording/` | `TrackWriter` (one writer for all four raw tracks), `EventRecorder`, `CursorSampler`, `RecordingBundle` layout, `TeleprompterController` |
 | `Mentor/Soundboard/` | Soundboard engine + cues + hotkey binding |
-| `Mentor/Editor/` | `RecordingProject`, `EditorComposition`, `LiveCompositor`, `EditorViewModel`, keyframe models, `SilenceAnalyzer`, `SourceCoordinateMapper`, `TrimMap` |
+| `Mentor/Editor/` | `RecordingProject`, `EditorComposition`, `LiveCompositor`, `OverlaySettings` (the one value both preview and export render from), `EditorViewModel`, `EditState` + `SidecarStore` (per-recording edits, debounced saves), keyframe models + `RampKeyframe` (shared zoom/talking-head editing rules), `SilenceAnalyzer`, `SourceCoordinateMapper`, `TrimMap`; `EditorView` with `Inspector/` (one view per section), `Timeline/`, `ExportSheet` |
 | `Mentor/Rendering/` | `FinalRenderer` (reader → compositor → writer), `ExportQuality`, `SRTFormatter` |
+| `Mentor/Orbis/` | "Export to Orbis": `OrbisAccount` (connection owner — OAuth 2.1 PKCE + loopback sign-in as client `mentor-mac`, scope `videos`, same flow as Muesli; refresh/revoke; personal access tokens are no longer supported and are purged on upgrade), `OAuthLoopbackServer`, `OrbisClient` (REST; asks `OrbisAccount` for a credential per request), `OrbisExportController` (FinalRenderer → presigned R2 PUT → ingest-assets), `OrbisExportSheet`, `OrbisKeychain` (refresh token keyed per host, never UserDefaults), `OrbisSettings` (host + last-used form values). No `mentor://` URL scheme — it was a token-injection hole |
 | `Mentor/UI/` | SwiftUI/AppKit windows (Settings, Soundboard, SourcePicker, RegionSelector, Countdown, RecordingBorder, WebcamPreview, Teleprompter) |
 | `Mentor/Hotkeys/` | `GlobalHotkey` — Carbon `RegisterEventHotKey` wrapper |
 | `Mentor/Settings/` | `Settings` — UserDefaults-backed singleton, posts `Settings.didChange` notification |
@@ -206,26 +219,45 @@ This is a menu-bar-only app by default (`LSUIElement: true`). That means:
 
 ## Release workflow
 
-1. Bump `CFBundleShortVersionString` + `CFBundleVersion` in `project.yml`.
-   (Both — `CFBundleVersion` is the monotonic integer Sparkle compares.)
-2. Commit the source changes (**don't** stage `Mentor.xcodeproj/` — it's
-   gitignored and gets regenerated).
-3. `./build-dmg.sh` — regenerates the xcodeproj, clean Release build,
-   signs + notarizes + staples, emits the Sparkle `<item>` block at the
-   end. Notarization takes 1–5 min.
-4. `git tag v1.2.3 && git push && git push --tags`.
-5. `gh release create v1.2.3 Mentor.dmg --title "Mentor 1.2.3" --notes "..."`.
-6. Paste the `<item>` block into `appcast.xml` at the top of `<channel>`,
-   commit as `appcast: publish v1.2.3`, push.
+Same model as Muesli (`~/Muesli/scripts/release.sh`, docs/DEPLOYMENT.md §7).
 
-Users with the previous version get the update prompt on their next
-daily Sparkle check (or on next launch if they manually click "Check
-for Updates").
+1. Bump `MARKETING_VERSION` in `project.yml`. Optional release notes: an
+   HTML fragment at `release-notes/<version>.html`. Commit (**don't**
+   stage `Mentor.xcodeproj/`). The script refuses a dirty tree.
+2. `scripts/release.sh` on `main`:
+   - checks: clean tree, tag `vX.Y.Z` unused, version not already in
+     `dist/appcast.xml`, SUFeedURL is the Orbis feed, `main` up to date;
+   - clean Release build with `CURRENT_PROJECT_VERSION` = UTC timestamp;
+     inside-out signing (Sparkle helpers keep their own entitlements);
+   - notarize + staple the app (profile `Picsy`, or
+     `MENTOR_NOTARY_PROFILE`), zip it with `ditto --sequesterRsrc`, build
+     `dist/installer/Mentor-X.Y.Z.dmg` from the stapled app, notarize +
+     staple that;
+   - `generate_appcast --account ed25519` over `dist/` (refuses if the
+     Keychain key doesn't match `SUPublicEDKey`), then stages
+     `dist/upload-X.Y.Z/` (appcast, zip, DMG, new deltas), tags, pushes.
+3. The user uploads `dist/upload-X.Y.Z/*` to the Orbis Replit project's
+   `client/public/download/mentor/`, replacing `appcast.xml`, and
+   redeploys. Files only reach production with a deploy.
+4. `scripts/release.sh --verify` — confirms Orbis serves the appcast, zip
+   and DMG with matching sizes. **Orbis returns 200 + its SPA HTML for
+   missing files**, so a browser or `curl -I` status check proves nothing.
+
+`dist/` is gitignored but must be kept between releases: generate_appcast
+reads the previous feed and old zips (for deltas) from it.
+
+**One-time bridge (first Orbis release only):** copies up to 1.1.1 poll
+`appcast.xml` on GitHub `main`. After `--verify` passes, copy the new
+release's `<item>` from `dist/appcast.xml` into that file (absolute
+sbsorbis.com zip URL, same signature and length), commit
+`appcast: bridge vX.Y.Z to Orbis`, push. Then delete this paragraph.
 
 ## Tuning notes / gotchas accumulated so far
 
-- Raw H.264 tracks use **Baseline profile + `AVVideoAllowFrameReorderingKey: false`**
-  — minimal encoder latency during live capture.
+- Raw H.264 tracks use **High profile + `AVVideoAllowFrameReorderingKey: false`**
+  — not Baseline: Baseline's auto-level tops out below 4K on the Apple
+  Silicon HW encoder and throws an uncatchable NSInvalidArgument. No
+  reordering keeps per-frame latency at zero during live capture.
 - Export path uses **High profile + frame-rate hints**. No
   `AVAssetExportSession` — it picks heuristics that produce jittery
   output with mixed-rate sources.
@@ -242,7 +274,7 @@ for Updates").
   dropped audio. `CaptureContention.detectedOffenders()` surfaces this
   as a warning in the menu, with a "Quit Those Apps" alert. If user
   reports capture jitter, check this before blaming code.
-- **Debug log**: `MentorDebug.log(...)` writes to `/tmp/mentor-debug.log`,
+- **Debug log**: `MentorDebug.log(...)` writes to `~/Library/Logs/Mentor/mentor-debug.log`,
   reset on each `applicationDidFinishLaunching`. Tail it when
   diagnosing recording failures.
 - **Single-instance enforcement**: `AppDelegate` checks for another

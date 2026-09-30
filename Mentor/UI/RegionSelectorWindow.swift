@@ -104,6 +104,12 @@ final class RegionSelectorWindow {
         cb?(screen, rect)
     }
 
+    /// Programmatic cancel (the record shortcut pressed again while
+    /// selecting) — same path as Esc.
+    func dismiss() {
+        cancel()
+    }
+
     private func cancel() {
         teardown()
         let cb = onCancel

@@ -23,9 +23,16 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private let levelLock = NSLock()
     private var smoothedLevel: Float = 0  // 0...1
 
+    /// Build the session with whichever of camera / mic the user has
+    /// authorised and has connected. The two are independent: denying
+    /// camera access used to skip the whole session, silently recording
+    /// with no mic either. Throws only when neither input is usable.
     func configure() throws {
         guard !isConfigured else { return }
         session.beginConfiguration()
+        // Commit on every exit — a throw between begin and commit used to
+        // leave the session mid-configuration for every later retry.
+        defer { session.commitConfiguration() }
 
         // 1080p gives reasonable FOV headroom without tripping the 4K
         // background-replacement plumbing in newer macOS versions (which
@@ -43,24 +50,18 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         // can record a voiceover over a screen capture; conversely a
         // connected camera with no mic is fine for silent demos. We
         // only bail out if BOTH are missing — there's nothing to do.
-        let videoDevice = Self.resolveVideoDevice()
-        let audioDevice = Self.resolveAudioDevice()
+        let videoDevice = Self.isAuthorized(.video) ? Self.resolveVideoDevice() : nil
+        let audioDevice = Self.isAuthorized(.audio) ? Self.resolveAudioDevice() : nil
 
-        guard videoDevice != nil || audioDevice != nil else {
-            session.commitConfiguration()
-            throw CaptureError.noCamera
-        }
-
-        if let videoDevice {
-            let videoInput = try AVCaptureDeviceInput(device: videoDevice)
-            if session.canAddInput(videoInput) { session.addInput(videoInput) }
+        var addedInput = false
+        if let videoDevice, addInput(for: videoDevice) {
             Self.applyFrameRateLock(on: videoDevice)
+            addedInput = true
         }
-
-        if let audioDevice {
-            let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-            if session.canAddInput(audioInput) { session.addInput(audioInput) }
+        if let audioDevice, addInput(for: audioDevice) {
+            addedInput = true
         }
+        guard addedInput else { throw CaptureError.noCamera }
 
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -72,53 +73,79 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
         if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
 
-        session.commitConfiguration()
         isConfigured = true
     }
 
     /// `true` if the live session has a connected video input. Used to
     /// decide whether to spin up the webcam sidecar writer — we still
     /// want recording to work when the session is audio-only.
-    var hasVideoInput: Bool {
-        session.inputs
-            .compactMap { $0 as? AVCaptureDeviceInput }
-            .contains(where: { $0.device.hasMediaType(.video) })
-    }
+    var hasVideoInput: Bool { currentInput(for: .video) != nil }
 
-    /// Swap inputs live (no full session teardown). Called when the user
-    /// picks a different camera or microphone in Settings.
-    func reconfigureDevices() {
+    /// Same for the mic writer: a camera-only session (mic denied or
+    /// absent) must not create a mic.m4a — an empty one fails to open.
+    var hasAudioInput: Bool { currentInput(for: .audio) != nil }
+
+    /// Swap inputs to whatever Settings resolves to — but only the ones
+    /// that changed. Any device connect / disconnect (AirPods included)
+    /// used to remove and re-add *every* input, gapping the webcam and
+    /// mic mid-take and sometimes switching devices under the user.
+    ///
+    /// `keepConnectedDevices` is for while a recording is in flight: leave
+    /// a still-connected device alone even if a preferred one just
+    /// appeared or was picked in Settings, and only replace one that's
+    /// gone. The caller re-runs this without the flag once idle.
+    func reconfigureDevices(keepConnectedDevices: Bool = false) {
         guard isConfigured else { return }
+        let currentVideo = currentInput(for: .video)
+        let currentAudio = currentInput(for: .audio)
+        let wantVideo = Self.isAuthorized(.video) ? Self.resolveVideoDevice() : nil
+        let wantAudio = Self.isAuthorized(.audio) ? Self.resolveAudioDevice() : nil
+
+        func needsSwap(_ input: AVCaptureDeviceInput?, _ want: AVCaptureDevice?) -> Bool {
+            if keepConnectedDevices, let input, input.device.isConnected { return false }
+            return input?.device.uniqueID != want?.uniqueID
+        }
+        let swapVideo = needsSwap(currentVideo, wantVideo)
+        let swapAudio = needsSwap(currentAudio, wantAudio)
+        guard swapVideo || swapAudio else { return }
 
         session.beginConfiguration()
-
-        // Remove only the device inputs (leave outputs in place).
-        for input in session.inputs {
-            if input is AVCaptureDeviceInput {
-                session.removeInput(input)
+        defer { session.commitConfiguration() }
+        if swapVideo {
+            if let currentVideo { session.removeInput(currentVideo) }
+            if let wantVideo, addInput(for: wantVideo) {
+                Self.applyFrameRateLock(on: wantVideo)
             }
         }
-
-        if let videoDevice = Self.resolveVideoDevice() {
-            do {
-                let input = try AVCaptureDeviceInput(device: videoDevice)
-                if session.canAddInput(input) { session.addInput(input) }
-            } catch {
-                // swallow — device may have been unplugged mid-swap
-            }
-            Self.applyFrameRateLock(on: videoDevice)
+        if swapAudio {
+            if let currentAudio { session.removeInput(currentAudio) }
+            if let wantAudio { _ = addInput(for: wantAudio) }
         }
+        MentorDebug.log("CAMERA: swapped inputs (video=\(swapVideo), audio=\(swapAudio))")
+    }
 
-        if let audioDevice = Self.resolveAudioDevice() {
-            do {
-                let input = try AVCaptureDeviceInput(device: audioDevice)
-                if session.canAddInput(input) { session.addInput(input) }
-            } catch {
-                // swallow
-            }
+    private func currentInput(for type: AVMediaType) -> AVCaptureDeviceInput? {
+        session.inputs
+            .compactMap { $0 as? AVCaptureDeviceInput }
+            .first { $0.device.hasMediaType(type) }
+    }
+
+    /// Must be called inside begin/commitConfiguration. Failures (device
+    /// unplugged mid-swap, denied) are logged, not thrown.
+    private func addInput(for device: AVCaptureDevice) -> Bool {
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else { return false }
+            session.addInput(input)
+            return true
+        } catch {
+            MentorDebug.log("CAMERA: can't add \(device.localizedName): \(error.localizedDescription)")
+            return false
         }
+    }
 
-        session.commitConfiguration()
+    static func isAuthorized(_ type: AVMediaType) -> Bool {
+        AVCaptureDevice.authorizationStatus(for: type) == .authorized
     }
 
     // MARK: - Device discovery + resolution
@@ -210,12 +237,6 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
         let dims = CMVideoFormatDescriptionGetDimensions(input.device.activeFormat.formatDescription)
         return CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
-    }
-
-    /// Shorter source dimension in pixels (used to size the square center-crop).
-    var sourceMinDimPixels: CGFloat {
-        let s = sourcePixelSize
-        return min(s.width, s.height)
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {

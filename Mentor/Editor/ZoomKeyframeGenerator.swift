@@ -9,16 +9,11 @@ import Foundation
 /// to the edges of the recording, then resolve any time overlaps by
 /// shortening earlier ramps.
 ///
-/// Coordinate plumbing: the event log stores `NSEvent.mouseLocation`, which
-/// is **global Cocoa** screen coords (points, bottom-left origin of the
-/// primary display). For a display-source recording, we translate to
-/// display-local points (subtract the captured `NSScreen`'s frame origin)
-/// then multiply by the backing scale to land in image pixels — same
-/// coordinate system Core Image uses, with origin at bottom-left.
-///
-/// Window + region sources fall through to "no keyframes" for now: window
-/// position at click time isn't captured, and region needs a top-left/
-/// bottom-left disambiguation we haven't pinned down yet.
+/// Coordinate plumbing: the event log stores `NSEvent.mouseLocation`
+/// (global Cocoa points, bottom-left origin of the primary display).
+/// `SourceCoordinateMapper` turns each click into image pixels for the
+/// recording's display, window or region source — using the screen layout
+/// saved at record time — and drops clicks outside the captured area.
 @MainActor
 enum ZoomKeyframeGenerator {
 

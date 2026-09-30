@@ -3,22 +3,31 @@ import SwiftUI
 import ScreenCaptureKit
 
 @MainActor
-final class SourcePickerWindow {
+final class SourcePickerWindow: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var regionSelector: RegionSelectorWindow?  // strong ref so it lives until done
     private var highlight = ScreenHighlightWindow()
     private var onPicked: ((CaptureSource) -> Void)?
     private var onCancel: (() -> Void)?
+    /// `dismiss()` arrived while the shareable-content fetch was still in
+    /// flight — cancel as soon as it returns instead of presenting.
+    private var dismissRequested = false
 
     func show(
         onPicked: @escaping (CaptureSource) -> Void,
         onCancel: @escaping () -> Void
     ) async {
+        dismissRequested = false
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false,
                 onScreenWindowsOnly: true
             )
+            if dismissRequested {
+                dismissRequested = false
+                onCancel()
+                return
+            }
             self.onPicked = onPicked
             self.onCancel = onCancel
             present(content: content)
@@ -89,9 +98,32 @@ final class SourcePickerWindow {
         win.contentView = NSHostingView(rootView: view)
         win.center()
         win.isReleasedWhenClosed = false
+        // The title bar's close button used to just hide the window
+        // without reporting a cancel, leaving the caller waiting forever.
+        win.delegate = self
         self.window = win
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)
+    }
+
+    /// Cancel from outside (the record shortcut pressed again while
+    /// picking). Routes through the region selector if it's up so its
+    /// overlays are torn down too.
+    func dismiss() {
+        if let regionSelector {
+            regionSelector.dismiss()
+        } else if window != nil {
+            cancel()
+        } else {
+            dismissRequested = true
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // Only the close button gets here — `complete` / `cancel` use
+        // orderOut and nil `window` first.
+        guard (notification.object as? NSWindow) === window else { return }
+        cancel()
     }
 
     private func complete(_ source: CaptureSource) {

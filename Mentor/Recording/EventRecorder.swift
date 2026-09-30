@@ -20,6 +20,12 @@ final class EventRecorder {
         let chars: String?
         let bundleId: String?
         let appName: String?
+
+        func with(t newT: TimeInterval) -> Event {
+            Event(t: newT, type: type, button: button, x: x, y: y,
+                  keyCode: keyCode, modifiers: modifiers, chars: chars,
+                  bundleId: bundleId, appName: appName)
+        }
     }
 
     struct Log: Codable {
@@ -97,14 +103,29 @@ final class EventRecorder {
 
     /// Stop monitoring and return the collected log. Safe to call twice
     /// (returns nil after the first call).
-    func stop() -> Log? {
+    ///
+    /// `origin` is the recording's shared time zero (the first screen
+    /// frame, in `systemUptime` seconds — the host clock ScreenCaptureKit
+    /// stamps frames with). We start before capture is up, so without
+    /// rebasing every event would lead the video by the stream's startup
+    /// latency. Events before the origin weren't on screen; they're dropped.
+    func stop(rebasedToUptime origin: TimeInterval? = nil) -> Log? {
         lock.lock()
         guard started else { lock.unlock(); return nil }
         started = false
-        let collected = events
-        let date = startDate
+        var collected = events
+        var date = startDate
+        let shift = origin.map { $0 - referenceUptime } ?? 0
         events.removeAll(keepingCapacity: false)
         lock.unlock()
+
+        if shift != 0 {
+            collected = collected.compactMap { e in
+                let t = e.t - shift
+                return t >= 0 ? e.with(t: t) : nil
+            }
+            date = date.addingTimeInterval(shift)
+        }
 
         for m in monitors { NSEvent.removeMonitor(m) }
         monitors.removeAll()

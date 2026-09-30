@@ -4,10 +4,12 @@ import SwiftUI
 @MainActor
 final class EditorWindowController: NSWindowController, NSWindowDelegate {
     let project: RecordingProject
+    let viewModel: EditorViewModel
     var onClose: (() -> Void)?
 
     init(project: RecordingProject) {
         self.project = project
+        self.viewModel = EditorViewModel(project: project)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
@@ -17,7 +19,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         )
         window.title = project.displayName
         window.contentViewController = NSHostingController(
-            rootView: EditorView(project: project)
+            rootView: EditorView(viewModel: viewModel)
         )
         window.center()
         window.isReleasedWhenClosed = false
@@ -31,6 +33,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func windowWillClose(_ notification: Notification) {
+        // Edits autosave on a short debounce; don't lose one in flight.
+        viewModel.flushPendingSaves()
         onClose?()
     }
 }

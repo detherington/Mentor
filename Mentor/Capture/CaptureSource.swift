@@ -20,17 +20,6 @@ enum CaptureSource {
         }
     }
 
-    func makeFilter() -> SCContentFilter {
-        switch self {
-        case .display(let d):
-            return SCContentFilter(display: d, excludingWindows: [])
-        case .window(let w):
-            return SCContentFilter(desktopIndependentWindow: w)
-        case .region(let d, _):
-            return SCContentFilter(display: d, excludingWindows: [])
-        }
-    }
-
     /// Output frame size in pixels, accounting for backing scale.
     func pixelSize(scale: CGFloat) -> CGSize {
         switch self {

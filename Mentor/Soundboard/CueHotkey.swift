@@ -1,8 +1,10 @@
 import AppKit
+import Carbon.HIToolbox
 import Foundation
 
-/// A global-hotkey binding for a `SoundCue`. Captured from a key-down
-/// event's `keyCode` + the four primary modifier flags (⌃ ⌥ ⇧ ⌘).
+/// A global-hotkey binding for a `SoundCue` — also reused for the app's
+/// own record / pause shortcuts. Captured from a key-down event's
+/// `keyCode` + the four primary modifier flags (⌃ ⌥ ⇧ ⌘).
 ///
 /// Matching is modifier-sensitive and modifier-strict: the event's flags
 /// must match the stored flags exactly (no extra modifiers allowed),
@@ -29,13 +31,19 @@ struct CueHotkey: Equatable, Codable, Sendable {
         | NSEvent.ModifierFlags.control.rawValue
         | NSEvent.ModifierFlags.shift.rawValue
 
+    /// ⌘ / ⌥ / ⌃ — the modifiers that make a combo safe to bind globally.
+    static let requiredMask: UInt =
+        NSEvent.ModifierFlags.command.rawValue
+        | NSEvent.ModifierFlags.option.rawValue
+        | NSEvent.ModifierFlags.control.rawValue
+
     /// Build a `CueHotkey` from the event that captured the binding.
-    /// Returns nil if the event has no modifiers — unmodified keys would
-    /// constantly fire in the user's focused app and aren't a sensible
-    /// binding for a global hotkey.
+    /// Returns nil unless ⌘, ⌥ or ⌃ is held. Unmodified keys would fire
+    /// constantly in the user's focused app — and so would Shift-only
+    /// combos: a cue on ⇧A fired on every capital A typed anywhere.
     init?(capturing event: NSEvent) {
         let rawMods = event.modifierFlags.rawValue & Self.relevantMask
-        guard rawMods != 0 else { return nil }
+        guard rawMods & Self.requiredMask != 0 else { return nil }
         self.keyCode = event.keyCode
         self.modifierRaw = rawMods
         self.displayChar = CueHotkey.label(for: event)
@@ -58,6 +66,32 @@ struct CueHotkey: Equatable, Codable, Sendable {
         if flags.contains(.command) { parts.append("⌘") }
         parts.append(displayChar.uppercased())
         return parts.joined()
+    }
+
+    /// False for bindings saved before Shift-only combos were rejected.
+    var isSafeGlobalBinding: Bool {
+        modifierRaw & Self.requiredMask != 0
+    }
+
+    /// Carbon `RegisterEventHotKey` modifier mask for this combo.
+    var carbonModifiers: UInt32 {
+        let flags = NSEvent.ModifierFlags(rawValue: modifierRaw)
+        var m: UInt32 = 0
+        if flags.contains(.command) { m |= UInt32(cmdKey) }
+        if flags.contains(.option)  { m |= UInt32(optionKey) }
+        if flags.contains(.control) { m |= UInt32(controlKey) }
+        if flags.contains(.shift)   { m |= UInt32(shiftKey) }
+        return m
+    }
+
+    /// Menu-item key equivalent (+ mask) for single-character keys, so
+    /// the status menu shows the shortcut. Named keys (F5, arrows) get
+    /// no equivalent rather than a wrong one.
+    var menuKeyEquivalent: (key: String, mask: NSEvent.ModifierFlags)? {
+        guard displayChar.count == 1 else { return nil }
+        let mask = NSEvent.ModifierFlags(rawValue: modifierRaw)
+            .intersection([.command, .option, .control, .shift])
+        return (displayChar.lowercased(), mask)
     }
 
     /// True iff `event` should fire this hotkey.

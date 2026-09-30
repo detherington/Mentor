@@ -67,7 +67,7 @@ struct OrbisExportSheet: View {
                 .font(.title2)
             Text("Export to Orbis").font(.headline)
             Spacer()
-            if let name = OrbisSettings.shared.connectedUserName {
+            if let name = OrbisAccount.shared.userName {
                 Text(name).font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -95,7 +95,7 @@ struct OrbisExportSheet: View {
                 }
                 Section {
                     Toggle("Include transcript & thumbnail", isOn: $includeAssets)
-                        .help(vm.project.transcription == nil
+                        .help(vm.transcription == nil
                               ? "Mentor will still send a thumbnail; transcript isn't available for this recording."
                               : "Sends the Mentor-generated transcript so Orbis can skip AssemblyAI processing.")
                 }
@@ -275,9 +275,12 @@ struct OrbisExportSheet: View {
             trimMap: vm.currentExportTrimMap(),
             bundle: vm.project.bundle,
             metadata: vm.project.metadata,
-            transcription: vm.project.transcription,
+            // Live editor transcription, not the snapshot loaded at
+            // open — captions generated or edited this session count.
+            transcription: vm.transcription,
             recordedAt: vm.project.metadata.startDate
         )
+        vm.activeOrbisExport = controller
         controller.start(request)
     }
 
@@ -286,10 +289,10 @@ struct OrbisExportSheet: View {
     /// Client. Runs even when visibility is not Client — the fetch
     /// is cheap and switching to Client shouldn't introduce a spinner.
     private func loadClientsIfNeeded() async {
-        guard clients.isEmpty, let token = OrbisKeychain.loadToken() else { return }
+        guard clients.isEmpty, OrbisAccount.shared.isConnected else { return }
         loadingClients = true
         clientsError = nil
-        let client = OrbisClient(host: OrbisSettings.shared.host, token: token)
+        let client = OrbisAccount.shared.client()
         do {
             let list = try await client.listClients()
             clients = list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import AVFoundation
+import Carbon.HIToolbox
 
 @MainActor
 final class SettingsWindowController {
@@ -44,17 +45,11 @@ private struct SettingsView: View {
     @State private var availableCameras: [AVCaptureDevice] = []
     @State private var availableMics: [AVCaptureDevice]    = []
 
-    // Orbis state — mirror `OrbisSettings.shared` + Keychain into
-    // @State so SwiftUI renders reactively. Refreshed on
-    // `OrbisSettings.didChange` and after Connect / Disconnect /
-    // Test Connection actions.
+    // Orbis form state. Connection state itself is read straight from
+    // `OrbisAccount.shared` (observable), so it's never stale.
     @State private var orbisHost: String            = OrbisSettings.shared.host
-    @State private var orbisConnected: Bool         = OrbisSettings.shared.isConnected
-    @State private var orbisUserName: String?       = OrbisSettings.shared.connectedUserName
     @State private var orbisTestResult: String?     = nil
     @State private var orbisTesting: Bool           = false
-    @State private var orbisPasteToken: String      = ""
-    @State private var orbisValidating: Bool        = false
 
     var body: some View {
         Form {
@@ -143,6 +138,14 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Shortcuts") {
+                ShortcutRow(binding: .recordToggle)
+                ShortcutRow(binding: .pauseToggle)
+                Text("Global: they work whichever app is in front, so pick combos your other apps don't use (⌘⇧R is also a browser hard-reload). Pause only listens while a recording is running. Combos need ⌘, ⌥ or ⌃.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Output") {
                 HStack {
                     Text(CaptureCoordinator.outputDirectory.path)
@@ -160,55 +163,40 @@ private struct SettingsView: View {
             }
 
             Section("Orbis") {
-                TextField("Host", text: $orbisHost)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { OrbisSettings.shared.host = orbisHost }
-
+                let account = OrbisAccount.shared
                 HStack {
                     Circle()
-                        .fill(orbisConnected ? Color.green : Color.secondary)
+                        .fill(account.isConnected ? Color.green : Color.secondary)
                         .frame(width: 8, height: 8)
-                    if orbisConnected, let name = orbisUserName {
-                        Text("Connected as \(name)").font(.caption)
+                    if account.isConnected {
+                        Text("Signed in as \(account.userName ?? "?")").font(.caption)
                     } else {
                         Text("Not connected").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                 }
 
-                if orbisConnected {
+                if account.isSigningIn {
                     HStack {
-                        Button("Disconnect", role: .destructive) {
-                            OrbisSettings.shared.host = orbisHost
-                            disconnectOrbis()
-                        }
-                        Button(orbisTesting ? "Testing…" : "Test connection") {
-                            testOrbisConnection()
-                        }
-                        .disabled(orbisTesting)
+                        ProgressView().controlSize(.small)
+                        Text("Finish signing in in your browser…").font(.caption)
+                        Spacer()
+                        Button("Cancel") { account.cancelSignIn() }
+                    }
+                } else if account.isConnected {
+                    HStack {
+                        Button("Sign Out", role: .destructive) { signOutOfOrbis() }
+                        Button(orbisTesting ? "Testing…" : "Test connection") { testOrbisConnection() }
+                            .disabled(orbisTesting)
                     }
                 } else {
-                    // Two paths to authenticate:
-                    //   (1) Paste a PAT directly — works today.
-                    //   (2) Browser callback — requires Orbis to have
-                    //       the /settings/api-tokens page shipped. Until
-                    //       that exists, clicking it just opens a 404.
-                    SecureField("Paste Orbis token (starts with orb_…)", text: $orbisPasteToken)
-                        .textFieldStyle(.roundedBorder)
-                    HStack {
-                        Button(orbisValidating ? "Validating…" : "Save & validate") {
-                            validatePastedToken()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(orbisValidating ||
-                                  orbisPasteToken.trimmingCharacters(in: .whitespaces).isEmpty)
-                        Spacer()
-                        Button("Open Orbis in browser") {
-                            OrbisSettings.shared.host = orbisHost
-                            connectOrbis()
-                        }
-                        .help("Opens the Orbis PAT page. The page may not be available yet — fall back to pasting the token above.")
+                    if account.needsSignInAfterUpgrade {
+                        Text("Mentor now connects with your Orbis sign-in instead of an access token. Sign in once to keep exporting. Old Mentor tokens can be deleted from your Orbis settings.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                     }
+                    Button("Sign In with Orbis…") { signInToOrbis() }
+                        .buttonStyle(.borderedProminent)
                 }
 
                 if let result = orbisTestResult {
@@ -216,7 +204,11 @@ private struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("Orbis stores your recordings in a Cloudflare-backed video library. After you connect, an \"Export to Orbis\" action appears in the editor.")
+
+                TextField("Host", text: $orbisHost)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { commitOrbisHost() }
+                Text("Sign-ins are kept per host, so changing it never sends your credentials to a different server. Orbis stores your recordings in a Cloudflare-backed video library; once connected, \"Export to Orbis\" appears in the editor.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -225,10 +217,7 @@ private struct SettingsView: View {
         .frame(width: 520, height: 760)
         .onAppear {
             reloadDevices()
-            refreshOrbisState()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: OrbisSettings.didChange)) { _ in
-            refreshOrbisState()
+            orbisHost = OrbisSettings.shared.host
         }
     }
 
@@ -239,92 +228,124 @@ private struct SettingsView: View {
 
     // MARK: - Orbis actions
 
-    private func refreshOrbisState() {
-        orbisHost      = OrbisSettings.shared.host
-        orbisConnected = OrbisSettings.shared.isConnected
-        orbisUserName  = OrbisSettings.shared.connectedUserName
-    }
-
-    /// Open the browser to the Orbis PAT page. The callback
-    /// (`mentor://orbis-token?…`) is handled by `AppDelegate` once
-    /// the user finishes creating a token — no further action
-    /// needed on this side.
-    private func connectOrbis() {
-        guard let url = OrbisSettings.shared.connectURL() else {
-            orbisTestResult = "Can't open host URL. Check that the host is valid."
-            return
-        }
-        NSWorkspace.shared.open(url)
-    }
-
-    private func disconnectOrbis() {
-        OrbisKeychain.deleteToken()
-        OrbisSettings.shared.connectedUserName = nil
-        orbisTestResult = nil
-        orbisPasteToken = ""
-        refreshOrbisState()
-    }
-
-    /// Save a user-pasted PAT to the keychain and validate it against
-    /// `/api/auth/user`. Success → we're connected; failure → wipe the
-    /// token and surface the error so the user can correct it without
-    /// leaving a broken credential behind.
-    private func validatePastedToken() {
+    /// Every action commits the host field first — "Test connection"
+    /// used to run against the previously saved host.
+    private func commitOrbisHost() {
         OrbisSettings.shared.host = orbisHost
-        let token = orbisPasteToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return }
-        orbisValidating = true
+        orbisHost = OrbisSettings.shared.host
+        OrbisAccount.shared.syncHost()
+    }
+
+    private func signInToOrbis() {
+        commitOrbisHost()
         orbisTestResult = nil
         Task { @MainActor in
-            defer {
-                orbisValidating = false
-                refreshOrbisState()
-            }
             do {
-                try OrbisKeychain.saveToken(token)
+                try await OrbisAccount.shared.signIn()
+            } catch OAuthLoopbackServer.LoopbackError.cancelled {
+                // User pressed Cancel — nothing to report.
+            } catch is CancellationError {
             } catch {
-                orbisTestResult = "Couldn't save token to keychain: \(error.localizedDescription)"
-                return
-            }
-            let client = OrbisClient(host: OrbisSettings.shared.host, token: token)
-            do {
-                let me = try await client.me()
-                OrbisSettings.shared.connectedUserName = me.name ?? me.email ?? "Connected"
-                orbisPasteToken = ""
-                orbisTestResult = "Connected as \(OrbisSettings.shared.connectedUserName ?? "?")."
-            } catch {
-                OrbisKeychain.deleteToken()
-                OrbisSettings.shared.connectedUserName = nil
                 orbisTestResult = error.localizedDescription
             }
         }
     }
 
-    /// Hit `GET /api/auth/me`. Success → update the cached user name.
-    /// 401 → wipe the token + prompt re-auth. Anything else → show
-    /// the raw error so the user knows the server side is unhappy.
+    private func signOutOfOrbis() {
+        orbisTestResult = nil
+        Task { @MainActor in await OrbisAccount.shared.signOut() }
+    }
+
     private func testOrbisConnection() {
-        guard let token = OrbisKeychain.loadToken() else {
-            orbisTestResult = "Not connected."
-            return
-        }
+        commitOrbisHost()
         orbisTesting = true
         orbisTestResult = nil
         Task { @MainActor in
-            let client = OrbisClient(host: OrbisSettings.shared.host, token: token)
             do {
-                let me = try await client.me()
-                OrbisSettings.shared.connectedUserName = me.name ?? me.email ?? "Connected"
-                orbisTestResult = "Connected as \(OrbisSettings.shared.connectedUserName ?? "?")."
-            } catch OrbisError.tokenInvalid {
-                OrbisKeychain.deleteToken()
-                OrbisSettings.shared.connectedUserName = nil
-                orbisTestResult = "Token expired. Reconnect to refresh."
+                orbisTestResult = "Connected as \(try await OrbisAccount.shared.verify())."
             } catch {
                 orbisTestResult = error.localizedDescription
             }
             orbisTesting = false
-            refreshOrbisState()
         }
+    }
+}
+
+/// One global-shortcut row: the current combo (click to record a new
+/// one), plus clear and reset-to-default. Captures with a local key
+/// monitor; the live Carbon bindings are dropped meanwhile (see
+/// `GlobalHotkey.captureWillBegin`) so pressing the current combo reaches
+/// the recorder instead of starting a recording.
+private struct ShortcutRow: View {
+    let binding: HotkeyBinding
+    @State private var combo: CueHotkey?
+    @State private var isCapturing = false
+    @State private var monitor: Any?
+
+    init(binding: HotkeyBinding) {
+        self.binding = binding
+        _combo = State(initialValue: Settings.shared.shortcut(for: binding))
+    }
+
+    var body: some View {
+        HStack {
+            Text(binding.displayName)
+            Spacer()
+            Button {
+                if isCapturing { stopCapture() } else { startCapture() }
+            } label: {
+                Text(isCapturing ? "Press keys…  (esc)" : (combo?.displayString ?? "None"))
+                    .frame(minWidth: 90)
+                    .monospacedDigit()
+            }
+            if combo != nil, !isCapturing {
+                Button {
+                    save(nil)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Remove this shortcut")
+                .accessibilityLabel("Remove shortcut")
+            }
+            if combo != binding.defaultCombo, !isCapturing {
+                Button("Default") {
+                    Settings.shared.resetShortcut(for: binding)
+                    combo = binding.defaultCombo
+                }
+            }
+        }
+        .onDisappear { stopCapture() }
+    }
+
+    private func startCapture() {
+        NotificationCenter.default.post(name: GlobalHotkey.captureWillBegin, object: nil)
+        isCapturing = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == UInt16(kVK_Escape) {
+                stopCapture()
+            } else if let captured = CueHotkey(capturing: event) {
+                save(captured)
+                stopCapture()
+            } else {
+                // No ⌘ / ⌥ / ⌃ — not safe as a global shortcut.
+                NSSound.beep()
+            }
+            return nil
+        }
+    }
+
+    private func stopCapture() {
+        guard isCapturing else { return }
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        isCapturing = false
+        NotificationCenter.default.post(name: GlobalHotkey.captureDidEnd, object: nil)
+    }
+
+    private func save(_ newCombo: CueHotkey?) {
+        Settings.shared.setShortcut(newCombo, for: binding)
+        combo = newCombo
     }
 }

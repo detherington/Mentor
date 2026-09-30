@@ -16,7 +16,6 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
     private let videoQueue = DispatchQueue(label: "com.darrell.mentor.screen-capture.video", qos: .userInteractive)
     private let audioQueue = DispatchQueue(label: "com.darrell.mentor.screen-capture.audio", qos: .userInteractive)
 
-    private(set) var pixelSize: CGSize = .zero
 
     // Per-session drop counters. All reads + writes happen on `videoQueue`.
     // `idle` frames are the common case (SCStream stops emitting when the
@@ -38,7 +37,6 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
         guard let size = resolved else {
             throw CaptureError.writerSetupFailed("source has no capturable area")
         }
-        pixelSize = size
 
         let config = SCStreamConfiguration()
         config.width = Int(size.width)
@@ -133,6 +131,7 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
                 case .blank:     frameStatusBlankCount &+= 1
                 case .suspended: frameStatusSuspendedCount &+= 1
                 case .started:   frameStatusStartedCount &+= 1
+                case .complete, .stopped: frameStatusOtherCount &+= 1
                 @unknown default: frameStatusOtherCount &+= 1
                 }
                 return
@@ -161,19 +160,15 @@ final class ScreenCapture: NSObject, SCStreamDelegate, SCStreamOutput {
 }
 
 enum CaptureError: Error, LocalizedError {
-    case noDisplay
     case noCamera
-    case noMicrophone
     case writerSetupFailed(String)
-    case permissionDenied(String)
+    case alreadyRecording
 
     var errorDescription: String? {
         switch self {
-        case .noDisplay: return "No display available for capture."
         case .noCamera: return "No camera found."
-        case .noMicrophone: return "No microphone found."
         case .writerSetupFailed(let s): return "Recorder setup failed: \(s)"
-        case .permissionDenied(let s): return "Permission denied: \(s)"
+        case .alreadyRecording: return "A recording is already starting or in progress."
         }
     }
 }

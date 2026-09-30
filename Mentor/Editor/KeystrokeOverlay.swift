@@ -171,8 +171,8 @@ enum KeystrokeOverlayGenerator {
 // MARK: - Renderer
 
 /// Draws a single keystroke chip (rounded-rect pill with centred text)
-/// into a canvas-sized CIImage with transparent background. The
-/// compositor composes multiple chips side-by-side per frame.
+/// into a chip-sized CIImage with transparent background. The compositor
+/// caches chips by label and lays them out side-by-side per frame.
 enum KeystrokeChipRenderer {
 
     /// Render a pill at a given alpha. `size` is the target chip size

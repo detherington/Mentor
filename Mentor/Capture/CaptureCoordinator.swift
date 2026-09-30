@@ -42,43 +42,47 @@ final class CaptureCoordinator: @unchecked Sendable {
 
     private let stateLock = NSLock()
     private var _isRecording = false
+    /// Set for the duration of `startRecording`. `_isRecording` only flips
+    /// at the very end, so without this a second start (double-pressed
+    /// shortcut) replaced the first's writers and left its stream running.
+    private var _isStarting = false
+    private var _interruptionReported = false
+
+    /// Why a recording ended on its own.
+    enum Interruption {
+        /// SCStream stopped — display unplugged, captured window closed,
+        /// or sharing stopped from the system's menu-bar indicator.
+        case screenCaptureStopped(Error)
+        /// A track writer's append failed — usually a full disk.
+        case writeFailed(track: String, Error?)
+    }
+
+    /// Delivered at most once per recording, on the main queue. Set by
+    /// `AppDelegate`, which stops the recording (keeping what was
+    /// captured) and tells the user. Previously both cases were only
+    /// logged: the app sat in "recording" while nothing was being
+    /// written, and the loss surfaced at render time, if at all.
+    var onInterruption: ((Interruption) -> Void)?
 
     var isRecording: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return _isRecording
     }
 
-    /// Pause-state machine. Host-clock based so the cumulative offset
-    /// is in the same time domain as incoming CMSampleBuffer PTS
-    /// values (CMClockGetHostTimeClock()), and can be subtracted
-    /// directly to close the wall-clock gap in retimed samples.
-    private let pauseLock = NSLock()
-    private var _isPaused: Bool = false
-    private var _pauseStart: CMTime = .invalid
-    private var _cumulativePauseOffset: CMTime = .zero
+    /// Pause state + the recording's time origin. See `PauseClock`.
+    private let clock = PauseClock()
 
-    var isPaused: Bool {
-        pauseLock.lock(); defer { pauseLock.unlock() }
-        return _isPaused
-    }
+    var isPaused: Bool { clock.isPaused }
 
-    /// Total paused duration so far (host-time domain). Callers read
-    /// this to keep subsidiary loggers' offsets in sync.
-    var cumulativePauseOffsetSeconds: TimeInterval {
-        pauseLock.lock(); defer { pauseLock.unlock() }
-        return CMTimeGetSeconds(_cumulativePauseOffset)
-    }
+    /// Total paused duration so far. Callers read this to keep
+    /// subsidiary loggers' offsets in sync.
+    var cumulativePauseOffsetSeconds: TimeInterval { clock.cumulativeOffsetSeconds }
 
+    /// The recording in progress. Installed, rolled back and torn down as
+    /// one value under `pipelineLock`; the capture callbacks snapshot the
+    /// writer they need and release the lock before writing.
     private let pipelineLock = NSLock()
-    private var screenRawWriter: RawTrackWriter?
-    private var webcamRawWriter: RawTrackWriter?
-    private var micAudioWriter: AudioWriter?
-    private var systemAudioWriter: AudioWriter?
-    private var eventRecorder: EventRecorder?
-    private var cursorSampler: CursorSampler?
-    private var currentBundle: RecordingBundle?
-    private var currentMetadata: RecordingMetadata?
-    private var latestCameraBuffer: CVPixelBuffer?
+    private var session: RecordingSession?
 
     // Drop telemetry — tracks how many screen-delegate callbacks fired
     // and how often the raw writer was nil at that moment (i.e. samples
@@ -120,9 +124,10 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     /// Swap the live capture session's camera + mic inputs to whatever the
-    /// user picked in Settings. Safe to call while preview is running.
-    func reconfigureDevices() {
-        cameraCapture.reconfigureDevices()
+    /// user picked in Settings. Safe to call while preview is running; see
+    /// `CameraCapture.reconfigureDevices(keepConnectedDevices:)`.
+    func reconfigureDevices(keepConnectedDevices: Bool = false) {
+        cameraCapture.reconfigureDevices(keepConnectedDevices: keepConnectedDevices)
     }
 
     /// Stopping a recording hands back the finished bundle; callers
@@ -133,11 +138,32 @@ final class CaptureCoordinator: @unchecked Sendable {
     }
 
     func startRecording(source: CaptureSource) async throws {
-        let (outputSize, scale): (CGSize, CGFloat) = try await MainActor.run {
+        stateLock.lock()
+        guard !_isRecording, !_isStarting else {
+            stateLock.unlock()
+            throw CaptureError.alreadyRecording
+        }
+        _isStarting = true
+        _interruptionReported = false
+        stateLock.unlock()
+        defer {
+            stateLock.lock()
+            _isStarting = false
+            stateLock.unlock()
+        }
+
+        let (outputSize, scale, displayFrame, primaryHeight): (CGSize, CGFloat, CGRect?, CGFloat?) = try await MainActor.run {
             guard let size = source.outputPixelSize() else {
                 throw CaptureError.writerSetupFailed("source has no capturable area")
             }
-            return (size, source.backingScale())
+            // Snapshot the screen layout for the editor's click mapping.
+            let frame: CGRect? = {
+                switch source {
+                case .display, .region: return source.targetScreen()?.frame
+                case .window:           return nil
+                }
+            }()
+            return (size, source.backingScale(), frame, NSScreen.screens.first?.frame.height)
         }
         MentorDebug.log("COORD: startRecording source=\(source.displayName) outputSize=\(Int(outputSize.width))x\(Int(outputSize.height)) scale=\(scale)")
         let dir = Self.outputDirectory
@@ -145,44 +171,50 @@ final class CaptureCoordinator: @unchecked Sendable {
         let bundle = RecordingBundle.make(baseDirectory: dir)
         try bundle.createSidecarDirectory()
 
+        clock.reset()
+
         let captureSysAudio = Settings.shared.captureSystemAudio
 
-        // Raw video writers — baseline H.264, no B-frames, hints for 60fps
+        // Raw video writers — High-profile H.264, no frame reordering, hints for 60fps
         // screen / 30fps webcam so the media engine can plan rate control.
-        let screenRaw = try RawTrackWriter(
+        let screenRaw = try TrackWriter.video(
             outputURL: bundle.screenVideoURL,
             pixelSize: outputSize,
             averageBitrate: 8_000_000,
-            expectedFrameRate: 60
+            expectedFrameRate: 60,
+            holdsLastFrame: true,
+            onFailure: writeFailureHandler(track: "screen")
         )
-        // Webcam writer only spins up when the session actually has a
-        // video input. Mic writer only spins up when the session is
-        // configured at all (configure() succeeds if either video or
-        // audio was found). Creating either writer with no inputs
-        // produces empty MOV/M4A files that AVFoundation later refuses
-        // to open, so the cleaner path is to skip them entirely and
-        // let the editor/renderer treat the track as absent.
-        let webcamRaw: RawTrackWriter? = cameraCapture.hasVideoInput
-            ? try RawTrackWriter(
+        // Each writer only spins up when the session actually has that
+        // input. Creating one with no input produces an empty MOV/M4A
+        // that AVFoundation later refuses to open, so skip it and let the
+        // editor/renderer treat the track as absent. (The mic writer used
+        // to key off `isConfigured`, which a camera-only session also
+        // satisfies.)
+        let webcamRaw: TrackWriter? = cameraCapture.hasVideoInput
+            ? try TrackWriter.video(
                 outputURL: bundle.webcamVideoURL,
                 pixelSize: cameraCapture.sourcePixelSize,
                 averageBitrate: 4_000_000,
-                expectedFrameRate: 30
+                expectedFrameRate: 30,
+                onFailure: writeFailureHandler(track: "webcam")
             )
             : nil
 
-        let micWriter: AudioWriter? = cameraCapture.isConfigured
-            ? try AudioWriter(
+        let micWriter: TrackWriter? = cameraCapture.hasAudioInput
+            ? try TrackWriter.audio(
                 outputURL: bundle.micAudioURL,
                 channels: 1,
-                bitrate: 128_000
+                bitrate: 128_000,
+                onFailure: writeFailureHandler(track: "microphone")
             )
             : nil
-        let systemWriter: AudioWriter? = captureSysAudio
-            ? try AudioWriter(
+        let systemWriter: TrackWriter? = captureSysAudio
+            ? try TrackWriter.audio(
                 outputURL: bundle.systemAudioURL,
                 channels: 2,
-                bitrate: 192_000
+                bitrate: 192_000,
+                onFailure: writeFailureHandler(track: "system audio")
             )
             : nil
 
@@ -200,7 +232,7 @@ final class CaptureCoordinator: @unchecked Sendable {
         let metadata = RecordingMetadata(
             version: 1,
             startDate: Date(),
-            source: Self.metadataSourceInfo(for: source),
+            source: Self.metadataSourceInfo(for: source, displayFrame: displayFrame, primaryScreenHeight: primaryHeight),
             screenPixelSize: RecordingMetadata.CGSizeCodable(outputSize),
             webcamPixelSize: RecordingMetadata.CGSizeCodable(cameraCapture.sourcePixelSize),
             compositedPixelSize: RecordingMetadata.CGSizeCodable(outputSize),
@@ -214,16 +246,18 @@ final class CaptureCoordinator: @unchecked Sendable {
             backingScale: Double(scale)
         )
 
+        let newSession = RecordingSession(
+            bundle: bundle,
+            metadata: metadata,
+            screen: screenRaw,
+            webcam: webcamRaw,
+            mic: micWriter,
+            systemAudio: systemWriter,
+            events: eventRec,
+            cursor: cursorSamp
+        )
         pipelineLock.lock()
-        self.screenRawWriter = screenRaw
-        self.webcamRawWriter = webcamRaw
-        self.micAudioWriter = micWriter
-        self.systemAudioWriter = systemWriter
-        self.eventRecorder = eventRec
-        self.cursorSampler = cursorSamp
-        self.currentBundle = bundle
-        self.currentMetadata = metadata
-        latestCameraBuffer = nil
+        self.session = newSession
         pipelineLock.unlock()
 
         // Hook the live soundboard into this recording. Safe to call
@@ -242,19 +276,9 @@ final class CaptureCoordinator: @unchecked Sendable {
         } catch {
             // Roll back everything on failure
             pipelineLock.lock()
-            self.screenRawWriter = nil
-            self.webcamRawWriter = nil
-            self.micAudioWriter = nil
-            self.systemAudioWriter = nil
-            self.eventRecorder = nil
-            self.cursorSampler = nil
-            self.currentBundle = nil
-            self.currentMetadata = nil
+            self.session = nil
             pipelineLock.unlock()
-            _ = await screenRaw.finish()
-            _ = await webcamRaw?.finish()
-            _ = await micWriter?.finish()
-            _ = await systemWriter?.finish()
+            await newSession.finishWriters(endTime: nil)
             _ = eventRec.stop()
             _ = cursorSamp.stop()
             if let soundboard {
@@ -263,15 +287,6 @@ final class CaptureCoordinator: @unchecked Sendable {
             try? FileManager.default.removeItem(at: bundle.sidecarURL)
             throw error
         }
-
-        // Fresh recording — zero out any leftover pause state from a
-        // previous session so the first sample writes at PTS 0
-        // instead of inheriting an offset from a prior pause.
-        pauseLock.lock()
-        _isPaused = false
-        _pauseStart = .invalid
-        _cumulativePauseOffset = .zero
-        pauseLock.unlock()
 
         stateLock.lock()
         _isRecording = true
@@ -294,18 +309,13 @@ final class CaptureCoordinator: @unchecked Sendable {
         stateLock.unlock()
         guard active else { return }
 
-        pauseLock.lock()
-        guard !_isPaused else { pauseLock.unlock(); return }
-        _isPaused = true
-        _pauseStart = CMClockGetTime(CMClockGetHostTimeClock())
-        pauseLock.unlock()
+        guard clock.pause() else { return }
 
         pipelineLock.lock()
-        let evt = self.eventRecorder
-        let cur = self.cursorSampler
+        let current = self.session
         pipelineLock.unlock()
-        evt?.setPaused(true)
-        cur?.setPaused(true)
+        current?.events.setPaused(true)
+        current?.cursor.setPaused(true)
         MentorDebug.log("COORD: recording paused")
     }
 
@@ -319,38 +329,14 @@ final class CaptureCoordinator: @unchecked Sendable {
         stateLock.unlock()
         guard active else { return }
 
-        pauseLock.lock()
-        guard _isPaused, _pauseStart.isValid else {
-            pauseLock.unlock()
-            return
-        }
-        let now = CMClockGetTime(CMClockGetHostTimeClock())
-        let duration = CMTimeSubtract(now, _pauseStart)
-        _cumulativePauseOffset = CMTimeAdd(_cumulativePauseOffset, duration)
-        _isPaused = false
-        _pauseStart = .invalid
-        let offsetSeconds = CMTimeGetSeconds(_cumulativePauseOffset)
-        pauseLock.unlock()
+        guard let offsetSeconds = clock.resume() else { return }
 
         pipelineLock.lock()
-        let evt = self.eventRecorder
-        let cur = self.cursorSampler
+        let current = self.session
         pipelineLock.unlock()
-        evt?.setPaused(false, cumulativeOffsetSeconds: offsetSeconds)
-        cur?.setPaused(false, cumulativeOffsetSeconds: offsetSeconds)
+        current?.events.setPaused(false, cumulativeOffsetSeconds: offsetSeconds)
+        current?.cursor.setPaused(false, cumulativeOffsetSeconds: offsetSeconds)
         MentorDebug.log("COORD: recording resumed (cumulative pause offset: \(String(format: "%.2fs", offsetSeconds)))")
-    }
-
-    /// Snapshot of pause state used by the sample-handler hot path.
-    /// Returns `(drop, offset)` — drop true means the sample is
-    /// captured inside a paused window and should be discarded;
-    /// otherwise retime the sample by `offset` before writing.
-    private func pauseStateForSample() -> (drop: Bool, offset: CMTime) {
-        pauseLock.lock()
-        let drop = _isPaused
-        let offset = _cumulativePauseOffset
-        pauseLock.unlock()
-        return (drop, offset)
     }
 
     func stopRecording() async -> FinishedRecording? {
@@ -359,14 +345,13 @@ final class CaptureCoordinator: @unchecked Sendable {
         _isRecording = false
         stateLock.unlock()
 
-        // Clear pause state. If the user stops while paused, we
-        // don't want a stale `_isPaused` + offset to leak into the
-        // next recording. Loggers are idempotent on setPaused —
-        // safe to set false even if they weren't paused.
-        pauseLock.lock()
-        _isPaused = false
-        _pauseStart = .invalid
-        pauseLock.unlock()
+        // Each writer ends its session at the shared end of the timeline
+        // so all tracks are the same length (the screen writer re-stamps
+        // its last frame to reach it). Pause state is left alone — see
+        // `PauseClock.stopPoint()`.
+        let (origin, endTime) = clock.stopPoint()
+        // Loggers run on systemUptime, which shares the host clock's base.
+        let originUptime: TimeInterval? = origin.isValid ? CMTimeGetSeconds(origin) : nil
 
         await screenCapture.stop()
 
@@ -384,49 +369,50 @@ final class CaptureCoordinator: @unchecked Sendable {
         // stopping synchronises with the engine so by the time the
         // below writers finish, soundboard.m4a is fully flushed.
         if let soundboard {
-            await soundboard.stopRecordingTap()
+            await soundboard.stopRecordingTap(timeOriginUptime: originUptime)
         }
 
         pipelineLock.lock()
-        let screenRaw = self.screenRawWriter
-        let webcamRaw = self.webcamRawWriter
-        let micWriter = self.micAudioWriter
-        let sysWriter = self.systemAudioWriter
-        let eventRec = self.eventRecorder
-        let cursorSamp = self.cursorSampler
-        let bundle = self.currentBundle
-        let metadata = self.currentMetadata
-        self.screenRawWriter = nil
-        self.webcamRawWriter = nil
-        self.micAudioWriter = nil
-        self.systemAudioWriter = nil
-        self.eventRecorder = nil
-        self.cursorSampler = nil
-        self.currentBundle = nil
-        self.currentMetadata = nil
-        latestCameraBuffer = nil
+        let finished = self.session
+        self.session = nil
         pipelineLock.unlock()
+        guard let finished else { return nil }
 
-        // Finish all writers in parallel.
-        async let screenURL = screenRaw?.finish()
-        async let webcamURL = webcamRaw?.finish()
-        async let micURL    = micWriter?.finish()
-        async let sysURL    = sysWriter?.finish()
-        _ = await (screenURL, webcamURL, micURL, sysURL)
+        await finished.finishWriters(endTime: endTime)
 
         // Flush event log + metadata.
-        if let bundle, let eventRec, let log = eventRec.stop() {
+        let bundle = finished.bundle
+        if let log = finished.events.stop(rebasedToUptime: originUptime) {
             persistJSON(log, to: bundle.eventsURL)
         }
-        if let bundle, let cursorLog = cursorSamp?.stop() {
+        if let cursorLog = finished.cursor.stop(rebasedToUptime: originUptime) {
             persistJSON(cursorLog, to: bundle.cursorLogURL)
         }
-        if let bundle, let metadata {
-            persistJSON(metadata, to: bundle.metadataURL)
-        }
+        persistJSON(finished.metadata, to: bundle.metadataURL)
+        return FinishedRecording(bundle: bundle, metadata: finished.metadata)
+    }
 
-        guard let bundle, let metadata else { return nil }
-        return FinishedRecording(bundle: bundle, metadata: metadata)
+    private func writeFailureHandler(track: String) -> @Sendable (Error?) -> Void {
+        { [weak self] error in
+            self?.reportInterruption(.writeFailed(track: track, error))
+        }
+    }
+
+    /// Hand an interruption to `onInterruption` once per recording, and
+    /// only while actually recording (our own stop tears the stream down
+    /// without an error, and a start that fails throws instead).
+    private func reportInterruption(_ reason: Interruption) {
+        stateLock.lock()
+        guard _isRecording, !_interruptionReported else {
+            stateLock.unlock()
+            return
+        }
+        _interruptionReported = true
+        stateLock.unlock()
+        MentorDebug.log("COORD: recording interrupted: \(reason)")
+        DispatchQueue.main.async { [weak self] in
+            self?.onInterruption?(reason)
+        }
     }
 
     /// Mic level normalized to 0...1.
@@ -446,7 +432,16 @@ final class CaptureCoordinator: @unchecked Sendable {
         }
     }
 
-    private static func metadataSourceInfo(for source: CaptureSource) -> RecordingMetadata.SourceInfo {
+    private static func metadataSourceInfo(
+        for source: CaptureSource,
+        displayFrame: CGRect?,
+        primaryScreenHeight: CGFloat?
+    ) -> RecordingMetadata.SourceInfo {
+        let dfx = displayFrame.map { Double($0.origin.x) }
+        let dfy = displayFrame.map { Double($0.origin.y) }
+        let dfw = displayFrame.map { Double($0.width) }
+        let dfh = displayFrame.map { Double($0.height) }
+        let ph = primaryScreenHeight.map { Double($0) }
         switch source {
         case .display(let d):
             return .init(
@@ -457,7 +452,10 @@ final class CaptureCoordinator: @unchecked Sendable {
                 appBundleID: nil,
                 regionX: nil, regionY: nil, regionWidth: nil, regionHeight: nil,
                 windowFrameX: nil, windowFrameY: nil,
-                windowFrameWidth: nil, windowFrameHeight: nil
+                windowFrameWidth: nil, windowFrameHeight: nil,
+                displayFrameX: dfx, displayFrameY: dfy,
+                displayFrameWidth: dfw, displayFrameHeight: dfh,
+                primaryScreenHeight: ph
             )
         case .window(let w):
             // SCWindow.frame is in Quartz screen points (origin top-left of
@@ -474,7 +472,10 @@ final class CaptureCoordinator: @unchecked Sendable {
                 windowFrameX: Double(f.origin.x),
                 windowFrameY: Double(f.origin.y),
                 windowFrameWidth: Double(f.width),
-                windowFrameHeight: Double(f.height)
+                windowFrameHeight: Double(f.height),
+                displayFrameX: nil, displayFrameY: nil,
+                displayFrameWidth: nil, displayFrameHeight: nil,
+                primaryScreenHeight: ph
             )
         case .region(let d, let rect):
             return .init(
@@ -488,7 +489,10 @@ final class CaptureCoordinator: @unchecked Sendable {
                 regionWidth: Double(rect.width),
                 regionHeight: Double(rect.height),
                 windowFrameX: nil, windowFrameY: nil,
-                windowFrameWidth: nil, windowFrameHeight: nil
+                windowFrameWidth: nil, windowFrameHeight: nil,
+                displayFrameX: dfx, displayFrameY: dfy,
+                displayFrameWidth: dfw, displayFrameHeight: dfh,
+                primaryScreenHeight: ph
             )
         }
     }
@@ -497,32 +501,38 @@ final class CaptureCoordinator: @unchecked Sendable {
 extension CaptureCoordinator: ScreenCaptureDelegate {
     func screenCapture(_ capture: ScreenCapture, didOutputVideo sample: CMSampleBuffer) {
         pipelineLock.lock()
-        let screenRaw = self.screenRawWriter
+        let screenRaw = self.session?.screen
         pipelineLock.unlock()
         coordStatsLock.lock()
         screenDelegateCalls &+= 1
         if screenRaw == nil { screenDelegateWithNilWriter &+= 1 }
         coordStatsLock.unlock()
-        let (drop, offset) = pauseStateForSample()
+        let (drop, offset, origin) = clock.sampleState(
+            establishingOriginAt: CMSampleBufferGetPresentationTimeStamp(sample)
+        )
         if drop { return }
-        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
+        // `retimed` returns self for a zero offset; nil means the copy
+        // failed — drop rather than write an un-retimed sample that
+        // would land behind already-written ones.
+        guard let adjusted = sample.retimed(by: offset) else { return }
         // Only the raw track is written live — composited output is
         // rebuilt post-capture by FinalRenderer.
-        screenRaw?.append(adjusted)
+        screenRaw?.append(adjusted, sessionStart: origin)
     }
 
     func screenCapture(_ capture: ScreenCapture, didOutputAudio sample: CMSampleBuffer) {
         pipelineLock.lock()
-        let sysWriter = self.systemAudioWriter
+        let sysWriter = self.session?.systemAudio
         pipelineLock.unlock()
-        let (drop, offset) = pauseStateForSample()
+        let (drop, offset, origin) = clock.sampleState()
         if drop { return }
-        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
-        sysWriter?.append(adjusted)
+        guard let adjusted = sample.retimed(by: offset) else { return }
+        sysWriter?.append(adjusted, sessionStart: origin)
     }
 
     func screenCapture(_ capture: ScreenCapture, didFailWith error: Error) {
         MentorDebug.log("COORD: screen capture stopped: \(error)")
+        reportInterruption(.screenCaptureStopped(error))
     }
 }
 
@@ -530,8 +540,7 @@ extension CaptureCoordinator: CameraCaptureDelegate {
     func cameraCapture(_ capture: CameraCapture, didOutputVideo sample: CMSampleBuffer) {
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sample) else { return }
         pipelineLock.lock()
-        latestCameraBuffer = imageBuffer
-        let webcamRaw = self.webcamRawWriter
+        let webcamRaw = self.session?.webcam
         pipelineLock.unlock()
         coordStatsLock.lock()
         cameraDelegateCalls &+= 1
@@ -547,29 +556,31 @@ extension CaptureCoordinator: CameraCaptureDelegate {
         observerLock.unlock()
         observer?(imageBuffer)
 
-        let (drop, offset) = pauseStateForSample()
+        let (drop, offset, origin) = clock.sampleState()
         if drop { return }
-        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
-        webcamRaw?.append(adjusted)
+        guard let adjusted = sample.retimed(by: offset) else { return }
+        webcamRaw?.append(adjusted, sessionStart: origin)
     }
 
     func cameraCapture(_ capture: CameraCapture, didOutputAudio sample: CMSampleBuffer) {
         pipelineLock.lock()
-        let micWriter = self.micAudioWriter
+        let micWriter = self.session?.mic
         pipelineLock.unlock()
-        let (drop, offset) = pauseStateForSample()
+        let (drop, offset, origin) = clock.sampleState()
         if drop {
-            // Mic tap still sees samples while paused — teleprompter
-            // follow-voice + any other live listener shouldn't go
-            // silent just because the writer is on hold.
+            // Mic tap still sees samples while paused (or before the
+            // time origin exists) — teleprompter follow-voice + any other
+            // live listener shouldn't go silent just because the writer
+            // is on hold.
             micTapLock.lock()
             let sink = _micSampleSink
             micTapLock.unlock()
             sink?(sample)
             return
         }
-        let adjusted = CMTimeCompare(offset, .zero) > 0 ? (sample.retimed(by: offset) ?? sample) : sample
-        micWriter?.append(adjusted)
+        if let adjusted = sample.retimed(by: offset) {
+            micWriter?.append(adjusted, sessionStart: origin)
+        }
 
         // Tee to any attached live-amplitude sink (e.g. the
         // teleprompter's follow-voice mode). Read the closure
@@ -580,5 +591,28 @@ extension CaptureCoordinator: CameraCaptureDelegate {
         let sink = _micSampleSink
         micTapLock.unlock()
         sink?(sample)
+    }
+}
+
+/// Everything one recording writes to, installed and torn down as a unit
+/// — start, rollback and stop each swap one value instead of eight
+/// separately-locked optionals.
+private struct RecordingSession {
+    let bundle: RecordingBundle
+    let metadata: RecordingMetadata
+    let screen: TrackWriter
+    let webcam: TrackWriter?
+    let mic: TrackWriter?
+    let systemAudio: TrackWriter?
+    let events: EventRecorder
+    let cursor: CursorSampler
+
+    /// Finish every writer in parallel at the shared end time.
+    func finishWriters(endTime: CMTime?) async {
+        async let screenDone = screen.finish(endTime: endTime)
+        async let webcamDone = webcam?.finish(endTime: endTime)
+        async let micDone = mic?.finish(endTime: endTime)
+        async let systemDone = systemAudio?.finish(endTime: endTime)
+        _ = await (screenDone, webcamDone, micDone, systemDone)
     }
 }

@@ -1,21 +1,24 @@
 import AppKit
 import Carbon.HIToolbox
 
-enum HotkeyBinding {
+enum HotkeyBinding: CaseIterable {
     case recordToggle
     case pauseToggle
 
-    var keyCode: UInt32 {
+    /// Built-in combos, used until the user rebinds (or clears) one in
+    /// Settings.
+    var defaultCombo: CueHotkey {
+        let cmdShift = NSEvent.ModifierFlags([.command, .shift]).rawValue
         switch self {
-        case .recordToggle: return UInt32(kVK_ANSI_R)
-        case .pauseToggle:  return UInt32(kVK_ANSI_P)
+        case .recordToggle: return CueHotkey(keyCode: UInt16(kVK_ANSI_R), modifierRaw: cmdShift, displayChar: "R")
+        case .pauseToggle:  return CueHotkey(keyCode: UInt16(kVK_ANSI_P), modifierRaw: cmdShift, displayChar: "P")
         }
     }
 
-    var modifiers: UInt32 {
+    var displayName: String {
         switch self {
-        case .recordToggle: return UInt32(cmdKey | shiftKey)
-        case .pauseToggle:  return UInt32(cmdKey | shiftKey)
+        case .recordToggle: return "Start / stop recording"
+        case .pauseToggle:  return "Pause / resume recording"
         }
     }
 
@@ -56,7 +59,14 @@ private let hotkeyCallback: EventHandlerUPP = { _, eventRef, _ in
 }
 
 final class GlobalHotkey {
-    private var hotKeyRefs: [EventHotKeyRef?] = []
+    /// Posted by the Settings shortcut recorder around a capture, so the
+    /// live bindings can be dropped while the user presses keys —
+    /// otherwise pressing the current combo to "rebind" it would start
+    /// a recording instead of reaching the recorder.
+    static let captureWillBegin = Notification.Name("MentorShortcutCaptureWillBegin")
+    static let captureDidEnd = Notification.Name("MentorShortcutCaptureDidEnd")
+
+    private var registered: [UInt32: (ref: EventHotKeyRef, combo: CueHotkey)] = [:]
     private var eventHandler: EventHandlerRef?
 
     init() {
@@ -74,25 +84,45 @@ final class GlobalHotkey {
         )
     }
 
-    func register(_ binding: HotkeyBinding, handler: @escaping () -> Void) {
+    /// Bind `combo` to `binding`, replacing any previous combo for it.
+    /// No-op when that exact combo is already live. Returns false when
+    /// Carbon refuses — typically another app already owns the combo —
+    /// which used to be ignored, leaving a shortcut that silently did
+    /// nothing.
+    @discardableResult
+    func register(_ binding: HotkeyBinding, combo: CueHotkey, handler: @escaping () -> Void) -> Bool {
         handlersByID[binding.id] = handler
+        if let existing = registered[binding.id], existing.combo == combo { return true }
+        unregister(binding)
         let id = EventHotKeyID(signature: binding.signature, id: binding.id)
         var ref: EventHotKeyRef?
-        RegisterEventHotKey(
-            binding.keyCode,
-            binding.modifiers,
+        let status = RegisterEventHotKey(
+            UInt32(combo.keyCode),
+            combo.carbonModifiers,
             id,
             GetApplicationEventTarget(),
             0,
             &ref
         )
-        hotKeyRefs.append(ref)
+        guard status == noErr, let ref else {
+            MentorDebug.log("HOTKEY: couldn't register \(combo.displayString) for \(binding) (status \(status))")
+            return false
+        }
+        registered[binding.id] = (ref, combo)
+        return true
+    }
+
+    func unregister(_ binding: HotkeyBinding) {
+        guard let existing = registered.removeValue(forKey: binding.id) else { return }
+        UnregisterEventHotKey(existing.ref)
+    }
+
+    func unregisterAll() {
+        for binding in HotkeyBinding.allCases { unregister(binding) }
     }
 
     deinit {
-        for ref in hotKeyRefs {
-            if let ref { UnregisterEventHotKey(ref) }
-        }
+        for (_, entry) in registered { UnregisterEventHotKey(entry.ref) }
         if let h = eventHandler { RemoveEventHandler(h) }
     }
 }

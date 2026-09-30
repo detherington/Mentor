@@ -31,6 +31,15 @@ final class SoundboardWindowController {
         win.center()
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 460, height: 320)
+        // Hotkey capture swallows keystrokes app-wide until a combo is
+        // pressed; closing the window mid-capture used to leave it armed.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: win,
+            queue: .main
+        ) { [controller] _ in
+            Task { @MainActor in controller.cancelCapturingHotkey() }
+        }
         self.window = win
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)

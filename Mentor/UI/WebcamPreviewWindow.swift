@@ -27,13 +27,11 @@ final class WebcamPreviewWindow: NSPanel {
     private let stateLock = NSLock()
     private var diameter: CGFloat
     private var shape: WebcamShape
-    private var sourceMinDimPixels: CGFloat
     private var backingScale: CGFloat = 2.0
 
-    init(diameter: CGFloat, shape: WebcamShape, sourceMinDimPixels: CGFloat) {
+    init(diameter: CGFloat, shape: WebcamShape) {
         self.diameter = diameter
         self.shape = shape
-        self.sourceMinDimPixels = sourceMinDimPixels
 
         if let device = MTLCreateSystemDefaultDevice() {
             self.ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
@@ -86,13 +84,12 @@ final class WebcamPreviewWindow: NSPanel {
         updateLayout()
     }
 
-    func apply(diameter: CGFloat, shape: WebcamShape, sourceMinDimPixels: CGFloat) {
+    func apply(diameter: CGFloat, shape: WebcamShape) {
         let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
 
         stateLock.lock()
         self.diameter = diameter
         self.shape = shape
-        self.sourceMinDimPixels = sourceMinDimPixels
         self.backingScale = scale
         stateLock.unlock()
 
@@ -136,7 +133,6 @@ final class WebcamPreviewWindow: NSPanel {
 
         stateLock.lock()
         let diameterPt = self.diameter
-        let sourceMinPx = self.sourceMinDimPixels
         let scale = self.backingScale
         stateLock.unlock()
 
@@ -151,8 +147,7 @@ final class WebcamPreviewWindow: NSPanel {
             guard let self else { return }
             guard let cgImage = self.renderCGImage(
                 from: pixelBuffer,
-                diameterPx: diameterPx,
-                sourceMinPx: sourceMinPx
+                diameterPx: diameterPx
             ) else { return }
 
             DispatchQueue.main.async {
@@ -178,15 +173,14 @@ final class WebcamPreviewWindow: NSPanel {
 
     private func renderCGImage(
         from pixelBuffer: CVPixelBuffer,
-        diameterPx: CGFloat,
-        sourceMinPx: CGFloat
+        diameterPx: CGFloat
     ) -> CGImage? {
         let raw = CIImage(cvPixelBuffer: pixelBuffer)
         let extent = raw.extent
         let side = min(extent.width, extent.height)
         guard side > 0, diameterPx > 0 else { return nil }
 
-        // Matches FrameCompositor: square center-crop of the full source
+        // Matches LiveCompositor: square center-crop of the full source
         // short side, scaled to fill the circle. Gives natural head-and-
         // shoulders framing at default sizes.
         let cropX = (extent.width - side) / 2

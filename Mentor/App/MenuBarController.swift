@@ -38,7 +38,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var durationTimer: Timer?
     private var micPollTimer: Timer?
     private var recordingStart: Date?
-    private var isFinalizing: Bool = false
     /// Wall-clock time the current pause started. Used by the
     /// duration ticker to subtract paused wall-clock out of the
     /// displayed "elapsed" number so it matches what the writers
@@ -238,6 +237,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Mirror the configured global shortcuts on the menu items (they're
+    /// user-configurable now, so no longer hard-coded ⌘⇧R / ⌘⇧P).
+    func setShortcuts(record: CueHotkey?, pause: CueHotkey?) {
+        for (item, combo) in [(startStopItem, record), (pauseResumeItem, pause)] {
+            guard let item else { continue }
+            if let equivalent = combo?.menuKeyEquivalent {
+                item.keyEquivalent = equivalent.key
+                item.keyEquivalentModifierMask = equivalent.mask
+            } else {
+                item.keyEquivalent = ""
+                item.keyEquivalentModifierMask = []
+            }
+        }
+    }
+
     func setWebcamPreviewShown(_ shown: Bool) {
         webcamPreviewItem.title = shown ? "Hide Webcam Preview" : "Show Webcam Preview"
     }
@@ -249,7 +263,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Toggle the "Finalizing…" indicator shown in the menu bar between
     /// recording stop and final-MP4 render completion.
     func setFinalizing(_ finalizing: Bool) {
-        isFinalizing = finalizing
         if finalizing {
             // Subtle spinner icon + title; doesn't replace the normal icon
             // during active recording (this only runs post-stop).
@@ -265,9 +278,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    func flashError(message: String) {
+    func flashError(title: String = "Recording failed", message: String) {
+        // LSUIElement: without activating first the alert opens behind
+        // whatever app is frontmost.
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Recording failed"
+        alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()

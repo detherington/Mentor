@@ -36,6 +36,20 @@ struct RecordingMetadata: Codable {
         let windowFrameY: Double?
         let windowFrameWidth: Double?
         let windowFrameHeight: Double?
+        /// Captured display's frame at recording start, in **Cocoa**
+        /// global points (origin bottom-left of the primary display).
+        /// Populated for `display` / `region`. Lets the editor map clicks
+        /// with the layout that was live while recording instead of
+        /// whatever the displays look like now — rearranged or unplugged
+        /// displays used to put zooms / ripples in the wrong place or drop
+        /// them. Optional: older bundles fall back to the live NSScreen.
+        let displayFrameX: Double?
+        let displayFrameY: Double?
+        let displayFrameWidth: Double?
+        let displayFrameHeight: Double?
+        /// Primary display height at recording start (points) — the
+        /// Quartz → Cocoa flip for `windowFrame*`. Optional, as above.
+        let primaryScreenHeight: Double?
     }
 
     struct WebcamLayoutInfo: Codable {
