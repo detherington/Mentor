@@ -1,11 +1,11 @@
 #!/usr/bin/env swift
-// Regenerate the Mentor app icon from a 1024×1024 source PNG.
+// Regenerate the Pepper app icon from a 1024×1024 source PNG.
 //
 // Run from the repo root:
 //   swift tools/generate-icon.swift [source.png]
 //
-// Default source: mentor-macOS-Default-1024x1024@1x.png in the repo root.
-// Output: Mentor/Resources/Assets.xcassets/AppIcon.appiconset/*.png
+// Default source: pepper-macOS-Default-1024x1024@1x.png in the repo root.
+// Output: Pepper/Resources/Assets.xcassets/AppIcon.appiconset/*.png
 //         plus the surrounding Contents.json manifests.
 //
 // The source PNG must be at least 1024×1024 (larger is fine — it'll just
@@ -16,7 +16,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-let defaultSource = "mentor-macOS-Default-1024x1024@1x.png"
+let defaultSource = "pepper-macOS-Default-1024x1024@1x.png"
 let sourcePath: String = CommandLine.arguments.count > 1
     ? CommandLine.arguments[1]
     : defaultSource
@@ -42,8 +42,8 @@ let sizes: [IconSize] = [
     .init(name: "icon_512x512@2x",  px: 1024)
 ]
 
-let iconset = "Mentor/Resources/Assets.xcassets/AppIcon.appiconset"
-let catalog = "Mentor/Resources/Assets.xcassets"
+let iconset = "Pepper/Resources/Assets.xcassets/AppIcon.appiconset"
+let catalog = "Pepper/Resources/Assets.xcassets"
 try? FileManager.default.createDirectory(atPath: iconset, withIntermediateDirectories: true)
 
 // Root-level catalog manifest (tells Xcode "this is an asset catalog").

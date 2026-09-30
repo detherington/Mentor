@@ -22,12 +22,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 
 cd "$REPO_ROOT"
-echo "→ Generating Mentor.xcodeproj…"
+echo "→ Generating Pepper.xcodeproj…"
 xcodegen generate
 
 echo
 echo "✅ Done. Open the project:"
-echo "   open Mentor.xcodeproj"
+echo "   open Pepper.xcodeproj"
 echo
 echo "Then in Xcode:"
 echo "  1. Cmd-R to build & run. Signing is pinned to the Developer ID"

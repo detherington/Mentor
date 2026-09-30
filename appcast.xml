@@ -7,12 +7,13 @@
         <description>Legacy auto-update feed for Mentor 1.1.1 and earlier.</description>
         <language>en</language>
 
-        <!-- Legacy feed. Mentor up to 1.1.1 polls this file; newer
-             versions poll https://sbsorbis.com/download/mentor/appcast.xml.
-             Releases are published on Orbis (scripts/release.sh). The only
-             item ever added here again is the bridge: a copy of the first
-             Orbis release's item, pointing at its zip on sbsorbis.com, so
-             older copies update into the new feed. Keep this file. -->
+        <!-- Legacy feed. Mentor up to 1.1.1 polls this file. The app is
+             now Pepper, and 2.0 onward polls
+             https://sbsorbis.com/download/pepper/appcast.xml; releases are
+             published on Orbis (scripts/release.sh). The only item ever
+             added here again is the bridge: a copy of the first Pepper
+             release's item, pointing at its zip on sbsorbis.com, so older
+             copies update into the new feed. Keep this file. -->
 
         <item>
             <title>Version 1.1.1</title>

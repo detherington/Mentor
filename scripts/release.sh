@@ -1,15 +1,15 @@
 #!/bin/bash
 #
-# Build, sign and notarize a Mentor release for Orbis — the same model as
+# Build, sign and notarize a Pepper release for Orbis — the same model as
 # Muesli. Everything lands in dist/:
-#   dist/Mentor-<version>.zip             what Sparkle downloads to update
-#   dist/installer/Mentor-<version>.dmg   what people install from
+#   dist/Pepper-<version>.zip             what Sparkle downloads to update
+#   dist/installer/Pepper-<version>.dmg   what people install from
 #   dist/appcast.xml                      the Sparkle feed (every release in
 #                                         dist/, plus delta updates)
 #   dist/upload-<version>/                exactly the files to upload
 #
-# Orbis serves them from https://sbsorbis.com/download/mentor/, and its
-# Mentor download page reads the appcast and links the newest DMG (it swaps
+# Orbis serves them from https://sbsorbis.com/download/pepper/, and its
+# Pepper download page reads the appcast and links the newest DMG (it swaps
 # the zip's .zip for .dmg, so both must be uploaded, with these names).
 #
 # Usage (from the repo root):
@@ -27,25 +27,25 @@
 # Prereqs (one-time): Developer ID Application cert (team 8B29CDK832);
 # Sparkle's EdDSA key in the login Keychain (account "ed25519", matching
 # SUPublicEDKey); a notarytool profile — `Picsy` here, or set
-# MENTOR_NOTARY_PROFILE:
+# PEPPER_NOTARY_PROFILE:
 #   xcrun notarytool store-credentials Picsy --apple-id dge@me.com --team-id 8B29CDK832
 # and xcodegen (brew install xcodegen, or scripts/bootstrap.sh).
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP_NAME="Mentor"
-DOWNLOAD_BASE="https://sbsorbis.com/download/mentor"
+APP_NAME="Pepper"
+DOWNLOAD_BASE="https://sbsorbis.com/download/pepper"
 FEED_URL="$DOWNLOAD_BASE/appcast.xml"
 SIGN_IDENTITY="Developer ID Application: Darrell Etherington (8B29CDK832)"
-NOTARY_PROFILE="${MENTOR_NOTARY_PROFILE:-Picsy}"
-# Keychain account holding Mentor's EdDSA key. Muesli signs with its own
+NOTARY_PROFILE="${PEPPER_NOTARY_PROFILE:-Picsy}"
+# Keychain account holding Pepper's EdDSA key. Muesli signs with its own
 # key file, so the two apps' update keys can't cross.
 SPARKLE_ACCOUNT="ed25519"
-ENTITLEMENTS="Mentor/Resources/Mentor.entitlements"
-INFO_PLIST_SRC="Mentor/Resources/Info.plist"
+ENTITLEMENTS="Pepper/Resources/Pepper.entitlements"
+INFO_PLIST_SRC="Pepper/Resources/Info.plist"
 DIST="dist"
-VOLUME_NAME="Mentor Installer"
+VOLUME_NAME="Pepper Installer"
 ICON_SIZE=128
 WINDOW_WIDTH=660
 WINDOW_HEIGHT=440
@@ -88,7 +88,7 @@ if [ "$MODE" = "verify" ]; then
         *xml*) ;;
         *) fail "$FEED_URL isn't there (Orbis served a web page) — upload appcast.xml." ;;
     esac
-    LIVE_FEED="$(mktemp -t mentor-appcast)"
+    LIVE_FEED="$(mktemp -t pepper-appcast)"
     curl -fsS -H 'Cache-Control: no-cache' -o "$LIVE_FEED" "$FEED_URL" || fail "couldn't fetch $FEED_URL"
     xmllint --noout "$LIVE_FEED" || fail "the live appcast isn't valid XML."
     grep -q "<sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>" "$LIVE_FEED" ||
@@ -195,8 +195,8 @@ if [ "$MODE" = "check" ]; then exit 0; fi
 BUILD="${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
 [[ "$BUILD" =~ ^[0-9]{12}$ ]] || fail "build number must be YYYYMMDDHHMM (got $BUILD)."
 echo "=== Building ${APP_NAME} ${VERSION} (${BUILD}) for Release ==="
-xcodebuild -project Mentor.xcodeproj \
-    -scheme Mentor \
+xcodebuild -project Pepper.xcodeproj \
+    -scheme Pepper \
     -configuration Release \
     -derivedDataPath build \
     MARKETING_VERSION="$VERSION" \
@@ -222,10 +222,10 @@ APP_PUBLIC=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$BUILT_INFO")
 # --options runtime → hardened runtime (required for notarization).
 # --timestamp embeds a secure timestamp from Apple's TSA (also required).
 #
-# Inside-out, never `--deep` with `--entitlements`: that stamped Mentor's
+# Inside-out, never `--deep` with `--entitlements`: that stamped Pepper's
 # camera + microphone entitlements onto every Sparkle helper (Installer.xpc,
 # Downloader.xpc, Autoupdate, Updater.app). Nested code is re-signed with
-# its own entitlements preserved; only the app gets Mentor.entitlements.
+# its own entitlements preserved; only the app gets Pepper.entitlements.
 echo "=== Signing ${APP_NAME}.app ==="
 sign_nested() {
     codesign --force --options runtime --timestamp \
@@ -403,7 +403,7 @@ fi
 echo ""
 echo "=== ${APP_NAME} ${VERSION} (${BUILD}) is built, notarized and stapled ==="
 echo "Upload everything in $(pwd)/${UPLOAD}/ to the Orbis Replit project's"
-echo "client/public/download/mentor/, then redeploy Orbis:"
+echo "client/public/download/pepper/, then redeploy Orbis:"
 ls -1 "$UPLOAD" | sed 's/^/  /'
 echo "Replace appcast.xml; keep the file names exactly (the appcast and the"
 echo "download page reference them). Then run: scripts/release.sh --verify"
