@@ -96,6 +96,8 @@ final class Settings {
         /// users find it corny. Opt-in.
         static let countdownShowGo    = "countdownShowGo"
         static let hideMenuBarIconWhenRecording = "hideMenuBarIconWhenRecording"
+        /// Menu bar only: no Dock icon except while an editor or setup is open.
+        static let hideDockIcon = "hideDockIcon"
         static let showWebcamPreview = "showWebcamPreview"
         static let cameraDeviceID = "cameraDeviceID"
         static let microphoneDeviceID = "microphoneDeviceID"
@@ -167,6 +169,7 @@ final class Settings {
             Key.countdownEnabled: true,
             Key.countdownSeconds: 3,
             Key.hideMenuBarIconWhenRecording: false,
+            Key.hideDockIcon: false,
             Key.showWebcamPreview: true,
             Key.editorSmartZoomEnabled: true,
             Key.editorCursorRipplesEnabled: true,
@@ -246,6 +249,11 @@ final class Settings {
     var hideMenuBarIconWhenRecording: Bool {
         get { defaults.bool(forKey: Key.hideMenuBarIconWhenRecording) }
         set { defaults.set(newValue, forKey: Key.hideMenuBarIconWhenRecording); post() }
+    }
+
+    var hideDockIcon: Bool {
+        get { defaults.bool(forKey: Key.hideDockIcon) }
+        set { defaults.set(newValue, forKey: Key.hideDockIcon); post() }
     }
 
     var showWebcamPreview: Bool {

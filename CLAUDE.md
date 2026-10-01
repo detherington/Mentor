@@ -14,12 +14,15 @@ compositing, Sparkle for auto-update.
 Distribution: same model as Muesli. Orbis serves releases from
 `https://sbsorbis.com/download/pepper/` (Sparkle appcast + update zips +
 DMGs); its Pepper download page links the newest DMG. The repo is still
-named `Mentor` (the app's working name before 2.0). LSUIElement app
-(menu-bar only by default; promotes to `.regular` activation when an editor
-window opens, demotes back on last-editor close).
+named `Mentor` (the app's working name before 2.0). Shows in the Dock with
+a main window (`UI/Home/`: record, recent recordings, devices, Orbis) that
+opens at launch and on a Dock click. Settings › "Hide Pepper from the Dock"
+makes it menu-bar only (no window at launch; `.regular` only while one of
+its windows is open, via `DockPresence`). `LSUIElement` stays true so a
+hidden Dock icon never flashes at launch; the policy is set at startup.
 
 Single-maintainer project; ship cadence is "whenever a feature's ready."
-Version is `MARKETING_VERSION` in `project.yml` — currently 1.1.0. The
+Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.0. The
 build number (`CURRENT_PROJECT_VERSION`) is a UTC `YYYYMMDDHHMM`
 timestamp set by the release script.
 
@@ -164,7 +167,7 @@ the same time base the editor uses for seeking. Don't mix wall-clock
 | `Pepper/Editor/` | `RecordingProject`, `EditorComposition`, `LiveCompositor`, `OverlaySettings` (the one value both preview and export render from), `EditorViewModel`, `EditState` + `SidecarStore` (per-recording edits, debounced saves), keyframe models + `RampKeyframe` (shared zoom/talking-head editing rules), `SilenceAnalyzer`, `SourceCoordinateMapper`, `TrimMap`; `EditorView` (window toolbar: details, Send to Orbis, Export) with `Inspector/` (`EditorInspector`: plain-language feature rows with switches, one open at a time via `vm.openInspectorFeature`, plus Quick polish; timeline/preview clicks open the matching row), `Timeline/`, `ExportSheet` (+ the save panel's Quality accessory) |
 | `Pepper/Rendering/` | `FinalRenderer` (reader → compositor → writer), `ExportQuality`, `SRTFormatter` |
 | `Pepper/Orbis/` | "Export to Orbis": `OrbisAccount` (connection owner — OAuth 2.1 PKCE + loopback sign-in as client `pepper-mac`, scope `videos`, same flow as Muesli; refresh/revoke), `OAuthLoopbackServer`, `OrbisClient` (REST; asks `OrbisAccount` for a credential per request), `OrbisExportController` (FinalRenderer → presigned R2 PUT → ingest-assets), `OrbisExportSheet`, `OrbisKeychain` (refresh token keyed per host, never UserDefaults), `OrbisSettings` (host + last-used form values). No custom URL scheme — an old token-delivery link was a token-injection hole |
-| `Pepper/UI/` | SwiftUI/AppKit windows (Settings, Soundboard, SourcePicker, RegionSelector, Countdown, RecordingBorder, WebcamPreview, Teleprompter, VideoReadyNotice — Pepper's own card, not a system notification, so no permission prompt); `Onboarding/` (setup walkthrough, modelled on Muesli's); `Brand` (SBS tokens shared with Muesli: colorsets, cobalt `AccentColor` app-wide, Nantes font in `Resources/Fonts`, Neon/Quiet button styles, `brandCard`/`brandKicker`/`brandTimecode`). The editor follows Muesli's rules: native toolbar/forms/menus/sheets; ground strips (timeline, inspector) carrying surface cards; one Neon CTA (Quick polish); Persimmon = live/playhead, Violet = automatic (zooms), Emerald = you (full-screen moments), Teal = caption blocks. Recording indicators (the border, the menu-bar record icon) stay system red on purpose: red is universally "recording" |
+| `Pepper/UI/` | `Home/` (main window: `HomeWindowController` — hides while a recording starts, back if it's cancelled — `HomeModel`, `HomeView`, in the setup/sign-in page look); SwiftUI/AppKit windows (Settings, Soundboard, SourcePicker, RegionSelector, Countdown, RecordingBorder, WebcamPreview, Teleprompter, VideoReadyNotice — Pepper's own card, not a system notification, so no permission prompt); `Onboarding/` (setup walkthrough, modelled on Muesli's); `Brand` (SBS tokens shared with Muesli: colorsets, cobalt `AccentColor` app-wide, Nantes font in `Resources/Fonts`, Neon/Quiet button styles, `brandCard`/`brandKicker`/`brandTimecode`). The editor follows Muesli's rules: native toolbar/forms/menus/sheets; ground strips (timeline, inspector) carrying surface cards; one Neon CTA (Quick polish); Persimmon = live/playhead, Violet = automatic (zooms), Emerald = you (full-screen moments), Teal = caption blocks. Recording indicators (the border, the menu-bar record icon) stay system red on purpose: red is universally "recording" |
 | `Pepper/Hotkeys/` | `GlobalHotkey` — Carbon `RegisterEventHotKey` wrapper |
 | `Pepper/Settings/` | `Settings` — UserDefaults-backed singleton, posts `Settings.didChange` notification |
 
@@ -201,7 +204,9 @@ the same time base the editor uses for seeking. Don't mix wall-clock
   YES` to also run Quick polish and render its report (it writes zooms
   and captions into the bundle, so point it at a copy). The video area
   renders black. `-pepper.debug.renderReadyNotice <dir>` writes the
-  "video is ready" card, light and dark.
+  "video is ready" card, light and dark; `-pepper.debug.renderHome <dir>`
+  the main window (run the binary directly if `open -n` won't block on it;
+  permissions then read as not granted).
 
 **Keep signing identity stable across builds** — ad-hoc signing
 reshuffles the CDHash every compile and re-prompts for every TCC grant.
@@ -210,7 +215,7 @@ reason.
 
 ## LSUIElement gotchas
 
-This is a menu-bar-only app by default (`LSUIElement: true`). That means:
+`LSUIElement: true`, and menu-bar only when the Dock icon is hidden. That means:
 - **No main menu bar** unless we install one manually —
   `MainMenu.build()` handles Cmd+Cut/Copy/Paste/Quit/Hide, Settings (⌘,),
   Open Recording (⌘O) and editor Undo/Redo (their own actions, not
@@ -225,10 +230,12 @@ This is a menu-bar-only app by default (`LSUIElement: true`). That means:
   panels, NSColorPanel, NSFontPanel all need `NSApp.activate(ignoringOtherApps: true)`
   called before they're shown. See the `Check for Updates` menu-bar
   callback in `AppDelegate` for the pattern.
-- **Activation policy flips while a window needs focus.** Editors, the
-  open panel and the setup walkthrough each `DockPresence.claim` so the
-  app is `.regular` (Dock, key focus); it drops back to `.accessory` when
-  the last claim is released. Don't call `setActivationPolicy` directly.
+- **Activation policy goes through `DockPresence`.** `.regular` unless
+  the Dock icon is hidden; then the main window, editors, the open panel
+  and the setup walkthrough each `DockPresence.claim` so the app is
+  `.regular` (Dock, key focus) while they're open, and it drops back to
+  `.accessory` when the last claim is released. Don't call
+  `setActivationPolicy` directly.
 
 ## Concurrency
 

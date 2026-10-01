@@ -9,6 +9,9 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     static let shared = OnboardingWindowController()
 
     private var window: NSWindow?
+    /// Called when the window closes, finished or not (the app then shows
+    /// the main window).
+    var onClose: (() -> Void)?
 
     /// `fromStart` for Settings' "Show Setup Guide…"; otherwise resumes
     /// on the saved step.
@@ -46,6 +49,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         window = nil
         DockPresence.release(self)
+        onClose?()
     }
 
     #if DEBUG

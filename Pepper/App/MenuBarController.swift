@@ -15,6 +15,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onToggleWebcamPreview: () -> Void = {}
     var onToggleTeleprompter: () -> Void = {}
     var onOpenRecording: () -> Void = {}
+    var onShowHome: () -> Void = {}
     var onEditLastRecording: () -> Void = {}
     var onCheckForUpdates: () -> Void = {}
     var onQuit: () -> Void = {}
@@ -130,6 +131,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(revealItem)
 
         menu.addItem(.separator())
+
+        let homeItem = NSMenuItem(
+            title: "Open Pepper Window",
+            action: #selector(handleShowHome(_:)),
+            keyEquivalent: ""
+        )
+        homeItem.target = self
+        menu.addItem(homeItem)
 
         let openItem = NSMenuItem(
             title: "Open Recording…",
@@ -306,6 +315,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func handleToggleWebcamPreview(_ sender: Any?) { onToggleWebcamPreview() }
     @objc private func handleToggleTeleprompter(_ sender: Any?)  { onToggleTeleprompter() }
     @objc private func handleOpenRecording(_ sender: Any?) { onOpenRecording() }
+    @objc private func handleShowHome(_ sender: Any?) { onShowHome() }
     @objc private func handleEditLast(_ sender: Any?) { onEditLastRecording() }
     @objc private func handleQuit(_ sender: Any?) { onQuit() }
 

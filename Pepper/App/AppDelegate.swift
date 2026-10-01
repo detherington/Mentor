@@ -12,6 +12,7 @@ import Sparkle
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController!
+    private var home: HomeWindowController!
     private var coordinator: CaptureCoordinator!
     private var recording: RecordingFlowController!
     private var editors: EditorWindowManager!
@@ -67,7 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.accessory)
+        // LSUIElement stays on so a hidden Dock icon never flashes at
+        // launch; the policy is set here instead.
+        DockPresence.apply()
         app.mainMenu = MainMenu.build()
         delegate.urlRouter.installAppleEventHandler()
         app.run()
@@ -80,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if OnboardingWindowController.renderStepsIfRequested() { exit(0) }
         if EditorWindowController.renderIfRequested() { exit(0) }
         if VideoReadyNotice.renderIfRequested() { exit(0) }
+        if HomeWindowController.renderIfRequested() { exit(0) }
         #endif
         // Drain any queued Apple Events (specifically `kAEOpenDocuments`)
         // before the duplicate-instance check. When Finder double-clicks a
@@ -125,6 +129,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         editors = EditorWindowManager(showError: { [weak self] in self?.menuBar.flashError(message: $0) })
+        home = HomeWindowController(actions: .init(
+            record: { [weak self] in self?.recording.start() },
+            open: { [weak self] in self?.editors.open($0) },
+            showOpenPanel: { [weak self] in self?.editors.showOpenPanel() },
+            showSettings: { [weak self] in self?.settingsController.show() },
+            revealRecordings: { [weak self] in self?.revealOutput() }
+        ))
 
         devices = CaptureDeviceMonitor(coordinator: coordinator)
         devices.isRecordingInFlight = { [weak self] in (self?.recording.state ?? .idle) != .idle }
@@ -149,6 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onToggleWebcamPreview   = { [weak self] in self?.toggleWebcamPreview() }
         menuBar.onToggleTeleprompter    = { [weak self] in self?.toggleTeleprompter() }
         menuBar.onOpenRecording         = { [weak self] in self?.editors.showOpenPanel() }
+        menuBar.onShowHome              = { [weak self] in self?.home.show() }
         menuBar.onEditLastRecording     = { [weak self] in self?.editors.openLatestRecording() }
         menuBar.onQuit                  = { NSApp.terminate(nil) }
         menuBar.micLevelProvider        = { [weak self] in self?.coordinator.micLevelNormalized() }
@@ -192,8 +204,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.devices.startSessionIfAuthorized()
             self?.refreshWebcamPreview()
         }
+        // The main window comes up at launch, after setup the first time.
+        // With the Dock icon hidden, Pepper starts quietly in the menu bar.
         if !Settings.shared.hasCompletedOnboarding {
+            OnboardingWindowController.shared.onClose = { [weak self] in
+                OnboardingWindowController.shared.onClose = nil
+                self?.home.show()
+            }
             OnboardingWindowController.shared.show()
+        } else if !Settings.shared.hideDockIcon {
+            home.show()
         }
 
         // Ready: open anything Finder handed us during launch.
@@ -204,7 +224,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         urlRouter.receive(urls)
     }
 
+    /// Clicking the Dock icon (or opening Pepper again from Finder) with
+    /// no window open shows the main window. The floating panels (webcam
+    /// preview, teleprompter) don't count as open windows.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        let hasWindow = sender.windows.contains { $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+        // A minimised window: let AppKit bring it back.
+        let hasMinimised = sender.windows.contains { $0.isMiniaturized }
+        guard !hasWindow, !hasMinimised else { return true }
+        home.show()
+        return false
+    }
+
     private func recordingStateChanged(_ state: RecordingFlowController.State) {
+        home.recordingStateChanged(state)
         applyShortcuts()
         // Device changes are held off while a recording is in flight
         // (see `reconfigureDevices(keepConnectedDevices:)`); catch up
@@ -339,6 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Settings-change handling
 
     private func onSettingsChanged() {
+        DockPresence.apply()
         let shortcuts = HotkeyBinding.allCases.map { Settings.shared.shortcut(for: $0) }
         if shortcuts != lastShortcutSettings {
             lastShortcutSettings = shortcuts

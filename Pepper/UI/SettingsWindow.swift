@@ -41,6 +41,7 @@ private struct SettingsView: View {
     @State private var countdownBeep    = Settings.shared.countdownBeepEnabled
     @State private var countdownGo      = Settings.shared.countdownShowGo
     @State private var hideMenuBar     = Settings.shared.hideMenuBarIconWhenRecording
+    @State private var hideDockIcon    = Settings.shared.hideDockIcon
     @State private var cameraDeviceID: String = Settings.shared.cameraDeviceID ?? ""
     @State private var micDeviceID: String    = Settings.shared.microphoneDeviceID ?? ""
     @State private var availableCameras: [AVCaptureDevice] = []
@@ -131,10 +132,17 @@ private struct SettingsView: View {
                         .onChange(of: countdownGo) { _, v in Settings.shared.countdownShowGo = v }
                 }
 
+                Text("Each recording writes a `.pepper` sidecar (raw screen + webcam + audio + event log) used by the editor. The composited MP4 is rendered in the background after you stop recording so live capture runs smoothly at full frame rate.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Menu Bar & Dock") {
+                Toggle("Hide Pepper from the Dock", isOn: $hideDockIcon)
+                    .onChange(of: hideDockIcon) { _, v in Settings.shared.hideDockIcon = v }
                 Toggle("Hide menu bar icon while recording", isOn: $hideMenuBar)
                     .onChange(of: hideMenuBar) { _, v in Settings.shared.hideMenuBarIconWhenRecording = v }
-
-                Text("Each recording writes a `.pepper` sidecar (raw screen + webcam + audio + event log) used by the editor. The composited MP4 is rendered in the background after you stop recording so live capture runs smoothly at full frame rate.")
+                Text("With the Dock icon hidden, Pepper starts quietly in the menu bar and shows in the Dock only while one of its windows is open.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
