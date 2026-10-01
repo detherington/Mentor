@@ -322,8 +322,13 @@ hdiutil create -srcfolder "$STAGING_DIR" \
     "$DMG_TEMP" >/dev/null
 MOUNT_DIR=$(hdiutil attach -readwrite -noverify "$DMG_TEMP" | grep "/Volumes/" | sed 's/.*\/Volumes/\/Volumes/')
 
-# Lay out: app on the left, Applications symlink on the right.
-osascript <<APPLESCRIPT
+# Lay out: app on the left, Applications symlink on the right. Finder does
+# it from the sizes above. When Finder can't be scripted — processes
+# started by some apps get "Application isn't running" for every Apple
+# Event — the layout saved from a good build is copied in instead: same
+# volume name and item names, so it applies as is. If the layout above
+# changes, refresh scripts/dmg/DS_Store from a mounted image.
+if ! osascript <<APPLESCRIPT
 tell application "Finder"
     tell disk "$VOLUME_NAME"
         open
@@ -348,6 +353,10 @@ tell application "Finder"
     end tell
 end tell
 APPLESCRIPT
+then
+    echo "warning: Finder couldn't lay out the disk image; using scripts/dmg/DS_Store."
+    cp scripts/dmg/DS_Store "$MOUNT_DIR/.DS_Store"
+fi
 
 sync
 hdiutil detach "$MOUNT_DIR" -quiet
