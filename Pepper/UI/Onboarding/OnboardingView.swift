@@ -43,6 +43,9 @@ struct OnboardingView: View {
                 Spacer(minLength: 0)
                 stepContent
                 Spacer(minLength: 0)
+                if isPermissionStep, permissions.systemPromptShowing {
+                    hiddenRequestNote
+                }
                 navigation
             }
             .padding(40)
@@ -64,6 +67,24 @@ struct OnboardingView: View {
         case .accessibility: accessibilityStep
         case .orbis: orbisStep
         case .done: doneStep
+        }
+    }
+
+    private var isPermissionStep: Bool {
+        [.screenRecording, .camera, .microphone, .accessibility].contains(step)
+    }
+
+    /// macOS's request is a window of its own, and clicking this one can
+    /// cover it; nothing on screen then says why the step is waiting.
+    private var hiddenRequestNote: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+            Text("macOS is asking for permission. Can't see its window? It may be behind this one.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button("Show It") { SystemPrompts.bringToFront() }
+                .buttonStyle(.link)
         }
     }
 

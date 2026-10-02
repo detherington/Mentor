@@ -41,6 +41,16 @@ final class Permissions {
     private(set) var camera: PermissionState = .notDetermined
     private(set) var microphone: PermissionState = .notDetermined
     private(set) var accessibility: PermissionState = .notDetermined
+    /// macOS has one of its own requests on screen (possibly behind our
+    /// window), for the walkthrough's "Show It" link.
+    private(set) var systemPromptShowing = false
+
+    /// Asked macOS for these this launch. Kept in memory, not in
+    /// UserDefaults: saved state outlives deleting the app and resetting
+    /// its permissions (Muesli hit this), and a saved "asked" would then
+    /// skip the request that puts Pepper back in System Settings' list,
+    /// opening a pane without Pepper in it.
+    @ObservationIgnored private var askedThisLaunch: Set<SystemSettingsPane> = []
 
     /// Camera or mic access was just granted — the capture session needs
     /// bringing up (or its inputs adding). Set by `AppDelegate`.
@@ -60,9 +70,13 @@ final class Permissions {
         camera = Self.state(for: .video)
         microphone = Self.state(for: .audio)
         accessibility = AXIsProcessTrusted() ? .granted : .notDetermined
+        systemPromptShowing = SystemPrompts.isShowing
         #if DEBUG
         if debugReportNothingGranted {
             (screenRecording, camera, microphone, accessibility) = (.notDetermined, .notDetermined, .notDetermined, .notDetermined)
+            // The render hook's un-granted pass also shows the "macOS is
+            // asking" note, which otherwise only appears mid-request.
+            systemPromptShowing = true
         }
         #endif
     }
@@ -82,34 +96,72 @@ final class Permissions {
             || (before.3 != .granted && accessibility == .granted)
     }
 
-    /// First time: macOS shows its own request and lists Pepper in System
-    /// Settings. After that the request does nothing, so open the pane,
-    /// where the person switches Pepper on themselves.
+    /// The first time, asks macOS, which lists Pepper under Screen
+    /// Recording and shows its own request, whose Open System Settings
+    /// button goes to the pane. Afterwards the request does nothing, so
+    /// straight to the pane. (See `askOnceThenOpen`.)
     func requestScreenRecording() {
-        if !CGRequestScreenCaptureAccess() {
-            SystemSettingsPane.screenRecording.open()
-        }
         refresh()
+        guard screenRecording != .granted else { return }
+        askOnceThenOpen(.screenRecording) {
+            _ = CGRequestScreenCaptureAccess()
+        }
     }
 
     func requestCamera() { request(.video) }
     func requestMicrophone() { request(.audio) }
 
-    /// Lists Pepper under Accessibility (macOS may show its own request)
-    /// and opens that pane: the request alone often never appears.
+    /// The first time, asks macOS, which lists Pepper under Accessibility
+    /// and usually shows its own request; afterwards, straight to the pane.
     func requestAccessibility() {
-        let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        if !AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary) {
-            SystemSettingsPane.accessibility.open()
-        }
         refresh()
+        guard accessibility != .granted else { return }
+        askOnceThenOpen(.accessibility) {
+            let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            _ = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
+        }
+    }
+
+    /// Muesli's pattern. Asking macOS and opening System Settings at once
+    /// put two things on screen: the pane, and macOS's request, which
+    /// nothing dismissed and which ended up behind the windows. So: the
+    /// first time this launch, only ask (which also lists Pepper in the
+    /// pane), and open the pane after a moment only if macOS showed
+    /// nothing (it stays quiet when it has asked before). After that, the
+    /// pane.
+    private func askOnceThenOpen(_ pane: SystemSettingsPane, ask: () -> Void) {
+        guard askedThisLaunch.insert(pane).inserted else {
+            openSettings(pane)
+            return
+        }
+        ask()
+        Task { @MainActor in
+            for _ in 0..<8 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if SystemPrompts.isShowing {
+                    systemPromptShowing = true
+                    return
+                }
+            }
+            refresh()
+            let state = pane == .screenRecording ? screenRecording : accessibility
+            if state != .granted { openSettings(pane) }
+        }
+    }
+
+    /// Opens a System Settings pane, unless macOS is asking something
+    /// right now: then that request comes to the front instead, so it
+    /// isn't left behind the Settings window.
+    func openSettings(_ pane: SystemSettingsPane) {
+        if SystemPrompts.bringToFront() { return }
+        pane.open()
     }
 
     /// A denied camera or mic can't be asked again — only System Settings
     /// can turn it back on.
     private func request(_ type: AVMediaType) {
         guard Self.state(for: type) == .notDetermined else {
-            SystemSettingsPane(mediaType: type).open()
+            openSettings(SystemSettingsPane(mediaType: type))
             return
         }
         Task { @MainActor in

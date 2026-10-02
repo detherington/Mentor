@@ -22,7 +22,7 @@ its windows is open, via `DockPresence`). `LSUIElement` stays true so a
 hidden Dock icon never flashes at launch; the policy is set at startup.
 
 Single-maintainer project; ship cadence is "whenever a feature's ready."
-Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.1. The
+Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.2. The
 build number (`CURRENT_PROJECT_VERSION`) is a UTC `YYYYMMDDHHMM`
 timestamp set by the release script.
 
@@ -188,6 +188,15 @@ the same time base the editor uses for seeking. Don't mix wall-clock
     `CaptionTranscriber` never asks there. Where it's needed it is asked
     for only from a button whose note says macOS will ask
     (`CaptionTranscriber.willAskForPermission`).
+- **Never ask macOS and open System Settings at once** (Muesli's rule):
+  macOS's own request then sits unanswered behind the windows. Screen
+  Recording and Accessibility ask once per launch and open the pane only
+  if `SystemPrompts` sees no request on screen; afterwards, the pane.
+  "Asked" is never saved: preferences outlive deleting the app and
+  resetting its permissions, and a stale flag would open a pane Pepper
+  isn't listed in. Read permission state live; don't cache it.
+  `Permissions.openSettings` brings a request already up to the front
+  instead of opening the pane over it.
 - **Nothing prompts at launch.** The setup walkthrough (`Onboarding/`,
   shown until `Settings.hasCompletedOnboarding`; Settings › Setup reopens
   it) asks for each permission from a button. A camera/mic skipped there
