@@ -114,6 +114,32 @@ struct TrimMap: Equatable, Sendable {
         return false
     }
 
+    // MARK: - Render time base
+
+    /// The composition's grid: screen tracks are written in 600ths.
+    static let renderTimescale: CMTimeScale = 600
+
+    /// The same trim and cuts on the composition's 1/600 s grid, inside
+    /// `duration`. Trim points and marks taken from the playhead during
+    /// playback are in nanoseconds; a range mixing those with the
+    /// composition's 600ths has its end rounded, and rounded up it lands
+    /// past the last frame (a third of a nanosecond, in the recording that
+    /// found this). The reader then rejects the whole video composition
+    /// (AVError -11841, "Final render failed: reader.startReading"). On
+    /// one grid start + duration is exact.
+    func snappedForRendering(within duration: CMTime) -> TrimMap {
+        let scale = Self.renderTimescale
+        let full = CMTimeConvertScale(duration, timescale: scale, method: .roundTowardZero)
+        func snap(_ time: CMTime) -> CMTime {
+            let snapped = CMTimeConvertScale(time, timescale: scale, method: .roundHalfAwayFromZero)
+            return Self.min(Self.max(snapped, .zero), full)
+        }
+        func snap(_ range: CMTimeRange) -> CMTimeRange {
+            CMTimeRange(start: snap(range.start), end: snap(range.end))
+        }
+        return TrimMap(outerTrim: snap(outerTrim), cuts: cuts.map(snap))
+    }
+
     // MARK: - Normalisation
 
     /// Clamp to outerTrim, drop empties, sort, merge overlapping /

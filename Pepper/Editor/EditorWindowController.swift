@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import AVFoundation
 
 @MainActor
 final class EditorWindowController: NSWindowController, NSWindowDelegate {
@@ -131,6 +132,56 @@ extension EditorWindowController {
             let name = state?.rawValue ?? "closed"
             try? rep.representation(using: .png, properties: [:])?
                 .write(to: dir.appendingPathComponent("editor-\(name).png"))
+        }
+        // `-pepper.debug.renderExportTo <file.mp4>`: run the editor's own
+        // export (its layout and trim, as Export and Send to Orbis do)
+        // and log how it ended.
+        if let exportPath = defaults.string(forKey: "pepper.debug.renderExportTo") {
+            let url = URL(fileURLWithPath: exportPath)
+            // `-pepper.debug.renderExportTrimIn <seconds>`: Set In at the
+            // playhead first, as the timeline button does.
+            let trimIn = defaults.double(forKey: "pepper.debug.renderExportTrimIn")
+            if trimIn > 0 {
+                vm.seek(to: CMTime(seconds: trimIn, preferredTimescale: 600))
+                RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+                vm.setTrimStartToCurrent()
+                PepperDebug.log("DEBUG: Set In at playhead \(vm.currentTime.value)/\(vm.currentTime.timescale)")
+            }
+            // `-pepper.debug.renderExportTrimInNs <nanoseconds>`: an In point
+            // in the player's nanosecond time base, as Set In gets during
+            // playback.
+            if let trimInNs = defaults.string(forKey: "pepper.debug.renderExportTrimInNs").flatMap(Int64.init) {
+                vm.setTrimStart(CMTime(value: CMTimeValue(trimInNs), timescale: 1_000_000_000))
+                PepperDebug.log("DEBUG: Set In at \(vm.trimStart.value)/\(vm.trimStart.timescale)")
+            }
+            // `-pepper.debug.renderExportCutNs <start,end>`: a cut between
+            // two nanosecond marks.
+            if let cut = defaults.string(forKey: "pepper.debug.renderExportCutNs")?
+                .split(separator: ",").compactMap({ Int64($0) }), cut.count == 2 {
+                vm.insertCut(CMTimeRange(start: CMTime(value: cut[0], timescale: 1_000_000_000),
+                                         end: CMTime(value: cut[1], timescale: 1_000_000_000)))
+                PepperDebug.log("DEBUG: cut \(vm.cutRanges.map { "\(CMTimeGetSeconds($0.start))..\(CMTimeGetSeconds($0.end))" })")
+            }
+            // `-pepper.debug.renderExportCleanAudio YES`: Clean up audio on.
+            if defaults.bool(forKey: "pepper.debug.renderExportCleanAudio") {
+                var style = vm.noiseReductionStyle
+                style.enabled = true
+                vm.noiseReductionStyle = style
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+                let cleanDeadline = Date().addingTimeInterval(120)
+                while vm.isCleaningMic || vm.isLoading, Date() < cleanDeadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+            }
+            vm.startExport(to: url)
+            let exportDeadline = Date().addingTimeInterval(600)
+            while vm.isExporting, Date() < exportDeadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            }
+            let outcome = vm.exportError.map { "FAILED: \($0.localizedDescription)" } ?? "OK"
+            PepperDebug.log("DEBUG: export \(url.lastPathComponent) trim=\(CMTimeGetSeconds(vm.trimStart))..\(CMTimeGetSeconds(vm.trimEnd)) duration=\(CMTimeGetSeconds(vm.duration)) → \(outcome)")
+            print("EXPORT \(outcome)")
         }
         // Quick polish writes zooms and captions into the bundle, so
         // this pass is opt-in: point it at a copy.

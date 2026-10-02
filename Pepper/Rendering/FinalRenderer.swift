@@ -158,7 +158,11 @@ enum FinalRenderer {
             metadata: metadata,
             micOverride: layout.micOverrideURL
         )
-        let effectiveMap = trimMap ?? .entire(CMTimeRange(start: .zero, duration: sourceComp.duration))
+        // On the composition's own grid: a trim point from the playhead
+        // can be in nanoseconds, and mixing time bases can push the
+        // reader's range past the last frame (see `snappedForRendering`).
+        let effectiveMap = (trimMap ?? .entire(CMTimeRange(start: .zero, duration: sourceComp.duration)))
+            .snappedForRendering(within: sourceComp.duration)
 
         // When the user has made interior cuts, stitch a new composition
         // whose duration already reflects only the kept segments. The

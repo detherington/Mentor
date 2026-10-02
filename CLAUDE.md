@@ -22,7 +22,7 @@ its windows is open, via `DockPresence`). `LSUIElement` stays true so a
 hidden Dock icon never flashes at launch; the policy is set at startup.
 
 Single-maintainer project; ship cadence is "whenever a feature's ready."
-Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.0. The
+Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.1. The
 build number (`CURRENT_PROJECT_VERSION`) is a UTC `YYYYMMDDHHMM`
 timestamp set by the release script.
 
@@ -206,7 +206,12 @@ the same time base the editor uses for seeking. Don't mix wall-clock
   renders black. `-pepper.debug.renderReadyNotice <dir>` writes the
   "video is ready" card, light and dark; `-pepper.debug.renderHome <dir>`
   the main window (run the binary directly if `open -n` won't block on it;
-  permissions then read as not granted).
+  permissions then read as not granted). With the editor hook,
+  `-pepper.debug.renderExportTo <file.mp4>` runs the editor's own export
+  (as Export and Send to Orbis do) and logs OK or the error;
+  `-pepper.debug.renderExportTrimInNs <ns>`, `-pepper.debug.renderExportCutNs
+  <start,end>`, `-pepper.debug.renderExportTrimIn <s>` and
+  `-pepper.debug.renderExportCleanAudio YES` set up the edit first.
 
 **Keep signing identity stable across builds** — ad-hoc signing
 reshuffles the CDHash every compile and re-prompts for every TCC grant.
@@ -286,6 +291,11 @@ reads the previous feed and old zips (for deltas) from it.
 - Export path uses **High profile + frame-rate hints**. No
   `AVAssetExportSession` — it picks heuristics that produce jittery
   output with mixed-rate sources.
+- **Render time ranges live on the composition's 1/600 s grid.** Trim
+  points and marks set from the playhead during playback are in
+  nanoseconds; mixed with 600ths, a range's end can round past the last
+  frame and the reader rejects the video composition (AVError -11841).
+  `FinalRenderer` snaps the `TrimMap` first (`snappedForRendering`).
 - `AVAudioFile` can't encode AAC directly from non-interleaved float
   mixer taps. Soundboard records to a temp `.caf` and transcodes to
   AAC on stop.
