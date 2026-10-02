@@ -19,6 +19,9 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
         var showOpenPanel: () -> Void
         var showSettings: () -> Void
         var revealRecordings: () -> Void
+        /// A recent recording's right-click menu.
+        var reveal: (URL) -> Void
+        var trash: (URL) -> Void
     }
 
     private let actions: Actions
@@ -40,6 +43,11 @@ final class HomeWindowController: NSObject, NSWindowDelegate {
         DockPresence.claim(self)
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)
+    }
+
+    /// After a recording is moved to the Trash.
+    func refreshRecordings() {
+        model.refresh()
     }
 
     func recordingStateChanged(_ state: RecordingFlowController.State) {
@@ -103,7 +111,8 @@ extension HomeWindowController {
         guard let path = UserDefaults.standard.string(forKey: "pepper.debug.renderHome") else { return false }
         let dir = URL(fileURLWithPath: path, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let noop = Actions(record: {}, open: { _ in }, showOpenPanel: {}, showSettings: {}, revealRecordings: {})
+        let noop = Actions(record: {}, open: { _ in }, showOpenPanel: {}, showSettings: {}, revealRecordings: {},
+                           reveal: { _ in }, trash: { _ in })
         let controller = HomeWindowController(actions: noop)
         controller.show()
         // Thumbnails load in the background.

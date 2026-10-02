@@ -33,6 +33,14 @@ struct EditorView: View {
                     showOrbisSheet = false
                 }
             }
+            .onChange(of: vm.pendingMenuCommand) { _, command in
+                guard let command else { return }
+                vm.pendingMenuCommand = nil
+                switch command {
+                case .export:      runExportSavePanel(viewModel: vm)
+                case .sendToOrbis: showOrbisSheet = true
+                }
+            }
     }
 
     @ViewBuilder

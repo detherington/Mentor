@@ -80,3 +80,39 @@ struct RecordingBundle {
         )
     }
 }
+
+// MARK: - Titles
+
+extension RecordingBundle {
+    /// When a recording was made, read from its bundle's name
+    /// ("Pepper_2026-10-02_12-59-36"); nil for a renamed bundle.
+    static func recordedDate(_ url: URL) -> Date? {
+        let stem = url.deletingPathExtension().lastPathComponent
+        guard stem.hasPrefix("Pepper_") else { return nil }
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return parser.date(from: String(stem.dropFirst("Pepper_".count)))
+    }
+
+    /// "Today, 12:59 PM", "Sep 29, 10:05 PM", or with the year when it
+    /// isn't this one: for editor window titles and the main window's
+    /// tiles, which showed the raw file name. A renamed bundle keeps its
+    /// own name.
+    static func displayTitle(_ url: URL) -> String {
+        guard let date = recordedDate(url) else { return url.deletingPathExtension().lastPathComponent }
+        let time = date.formatted(date: .omitted, time: .shortened)
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "Today, \(time)" }
+        if calendar.isDateInYesterday(date) { return "Yesterday, \(time)" }
+        let sameYear = calendar.isDate(date, equalTo: Date(), toGranularity: .year)
+        let day = date.formatted(sameYear ? .dateTime.month(.abbreviated).day() : .dateTime.month(.abbreviated).day().year())
+        return "\(day), \(time)"
+    }
+
+    /// The rendered video beside the bundle, if there is one.
+    static func videoFile(of url: URL) -> URL? {
+        let mp4 = url.deletingPathExtension().appendingPathExtension("mp4")
+        return FileManager.default.fileExists(atPath: mp4.path) ? mp4 : nil
+    }
+}

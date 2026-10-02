@@ -287,7 +287,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    func flashError(title: String = "Recording failed", message: String) {
+    /// `details`: the technical text, offered behind a Copy Details
+    /// button rather than shown.
+    func flashError(title: String = "Recording failed", message: String, details: String? = nil) {
         // LSUIElement: without activating first the alert opens behind
         // whatever app is frontmost.
         NSApp.activate(ignoringOtherApps: true)
@@ -295,7 +297,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning
-        alert.runModal()
+        alert.addButton(withTitle: "OK")
+        if details != nil { alert.addButton(withTitle: "Copy Details") }
+        if alert.runModal() == .alertSecondButtonReturn, let details {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(details, forType: .string)
+        }
     }
 
     // MARK: - Menu callbacks

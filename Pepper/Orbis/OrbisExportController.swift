@@ -26,7 +26,7 @@ final class OrbisExportController {
         case ingesting
         case completing
         case finished(videoID: String)
-        case failed(message: String)
+        case failed(FriendlyError)
     }
 
     /// Form inputs captured from the sheet before we start.
@@ -378,13 +378,7 @@ final class OrbisExportController {
     }
 
     private func fail(_ error: Error) {
-        let message: String
-        if let orbis = error as? OrbisError {
-            message = orbis.localizedDescription
-        } else {
-            message = error.localizedDescription
-        }
-        phase = .failed(message: message)
+        phase = .failed(FriendlyError(error))
         task = nil
     }
 

@@ -134,7 +134,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             open: { [weak self] in self?.editors.open($0) },
             showOpenPanel: { [weak self] in self?.editors.showOpenPanel() },
             showSettings: { [weak self] in self?.settingsController.show() },
-            revealRecordings: { [weak self] in self?.revealOutput() }
+            revealRecordings: { [weak self] in self?.revealOutput() },
+            reveal: { [weak self] in self?.revealRecording($0) },
+            trash: { [weak self] in self?.trashRecording($0) }
         ))
 
         devices = CaptureDeviceMonitor(coordinator: coordinator)
@@ -150,13 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onRevealOutput          = { [weak self] in self?.revealOutput() }
         menuBar.onShowSettings          = { [weak self] in self?.settingsController.show() }
         menuBar.onShowSoundboard        = { [weak self] in self?.soundboardWindow.show() }
-        menuBar.onCheckForUpdates       = { [weak self] in
-            // LSUIElement apps don't auto-activate when menu-bar actions
-            // fire, so Sparkle's update panel opens behind whichever
-            // window is frontmost. Activate so it lands on top.
-            NSApp.activate(ignoringOtherApps: true)
-            self?.updater.checkForUpdates(nil)
-        }
+        menuBar.onCheckForUpdates       = { [weak self] in self?.checkForUpdates(nil) }
         menuBar.onToggleWebcamPreview   = { [weak self] in self?.toggleWebcamPreview() }
         menuBar.onToggleTeleprompter    = { [weak self] in self?.toggleTeleprompter() }
         menuBar.onOpenRecording         = { [weak self] in self?.editors.showOpenPanel() }
@@ -482,13 +478,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Main menu actions
 
     @objc func showSettingsWindow(_ sender: Any?) { settingsController.show() }
+
+    /// Pepper menu and the menu-bar menu. LSUIElement apps don't
+    /// auto-activate when a menu-bar action fires, so Sparkle's update
+    /// panel would open behind whichever window is frontmost; activate so
+    /// it lands on top.
+    @objc func checkForUpdates(_ sender: Any?) {
+        NSApp.activate(ignoringOtherApps: true)
+        updater.checkForUpdates(nil)
+    }
     @objc func showOpenRecordingPanel(_ sender: Any?) { editors.showOpenPanel() }
 
     // Reached only when no editor is key (the key editor handles these
-    // first): disable Undo and Redo and drop the last editor's action
-    // name from their titles.
+    // first): disable Undo, Redo, Export and Send to Orbis, and drop the
+    // last editor's action name from Undo and Redo.
     @objc func undoEditorChange(_ sender: Any?) {}
     @objc func redoEditorChange(_ sender: Any?) {}
+    @objc func exportVideo(_ sender: Any?) {}
+    @objc func sendToOrbis(_ sender: Any?) {}
+
+    // MARK: - Recordings
+
+    /// A recording is two files side by side: the `.pepper` bundle and,
+    /// once rendered, its `.mp4`.
+    private func files(of recording: URL) -> [URL] {
+        [recording] + [RecordingBundle.videoFile(of: recording)].compactMap { $0 }
+    }
+
+    private func revealRecording(_ recording: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting(files(of: recording))
+    }
+
+    /// Both files to the Trash, after asking: they can be put back from
+    /// there, but a recording is the one thing Pepper can't remake.
+    private func trashRecording(_ recording: URL) {
+        if self.recording.renderingBundles.contains(recording.standardizedFileURL) || editors.isExporting(recording) {
+            menuBar.flashError(
+                title: "This recording is busy",
+                message: "Pepper is still saving or exporting its video. Try again when that's finished."
+            )
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Move this recording to the Trash?"
+        alert.informativeText = "The recording from \(RecordingBundle.displayTitle(recording)) and its video go to the Trash. You can put them back from there."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Move to Trash").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // Its editor saves pending edits as it closes, before the move.
+        editors.close(recording)
+        NSWorkspace.shared.recycle(files(of: recording)) { [weak self] _, error in
+            Task { @MainActor in
+                if let error {
+                    self?.menuBar.flashError(
+                        title: "Couldn't move the recording to the Trash",
+                        message: FriendlyError(error).advice,
+                        details: FriendlyError(error).details
+                    )
+                }
+                self?.home.refreshRecordings()
+            }
+        }
+    }
 
     // MARK: - Misc
 
@@ -508,6 +561,12 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(redoEditorChange(_:)):
             item.title = "Redo"
             return false
+        case #selector(exportVideo(_:)), #selector(sendToOrbis(_:)):
+            return false
+        case #selector(checkForUpdates(_:)):
+            // Greyed out while a check is already running, as Sparkle's
+            // own menu item would be.
+            return updater.updater.canCheckForUpdates
         default:
             return true
         }

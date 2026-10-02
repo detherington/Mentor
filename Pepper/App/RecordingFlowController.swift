@@ -55,6 +55,10 @@ final class RecordingFlowController {
         }
     }
 
+    /// Recordings whose as-recorded MP4 is still being written; moving
+    /// one to the Trash then would pull the files from under the render.
+    private(set) var renderingBundles: Set<URL> = []
+
     /// Stop / render pipelines still running.
     var pendingFinalizeTasks: [Task<Void, Never>] {
         Array(finalizeTasks.values)
@@ -296,6 +300,9 @@ final class RecordingFlowController {
             // minutes from existing.
             self.onRecordingSaved?(finished.bundle.sidecarURL)
             self.menuBar.setFinalizing(true)
+            let bundleURL = finished.bundle.sidecarURL.standardizedFileURL
+            self.renderingBundles.insert(bundleURL)
+            defer { self.renderingBundles.remove(bundleURL) }
             // Render the composited MP4 post-capture. The heavy lifting
             // runs on the renderer's own queues, so awaiting it here
             // doesn't block the main actor.
@@ -314,8 +321,13 @@ final class RecordingFlowController {
             } catch {
                 PepperDebug.log("APP: final render failed: \(error.localizedDescription)")
                 self.menuBar.setFinalizing(false)
+                let problem = FriendlyError(error)
                 self.menuBar.flashError(
-                    message: "Final MP4 render failed: \(error.localizedDescription). You can still open the .pepper bundle in the editor."
+                    title: "Pepper couldn't make the video file",
+                    message: problem.isOutOfSpace
+                        ? "Your Mac is out of space. Free some up, then open the recording and use Export."
+                        : "Your recording is saved. Open it in the editor and use Export to make the video.",
+                    details: problem.details
                 )
             }
         }

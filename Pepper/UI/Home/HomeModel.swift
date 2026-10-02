@@ -31,7 +31,7 @@ final class HomeModel {
 
     func refresh() {
         recents = Self.latestRecordings(limit: Self.recentCount).map {
-            Recent(url: $0, title: Self.title(for: $0))
+            Recent(url: $0, title: RecordingBundle.displayTitle($0))
         }
         for recent in recents where thumbnails[recent.url] == nil && !loading.contains(recent.url) {
             load(recent.url)
@@ -88,25 +88,6 @@ final class HomeModel {
             (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
         }
         return Array(bundles.sorted { created($0) > created($1) }.prefix(limit))
-    }
-
-    /// "Today, 1:20 PM" or "Sep 29, 10:05 PM", from the time in the
-    /// bundle's name. Short enough for a tile.
-    private static func title(for recording: URL) -> String {
-        let stem = recording.deletingPathExtension().lastPathComponent
-        let parser = DateFormatter()
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        parser.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        guard stem.hasPrefix("Pepper_"), let date = parser.date(from: String(stem.dropFirst("Pepper_".count))) else {
-            return stem
-        }
-        let time = date.formatted(date: .omitted, time: .shortened)
-        let calendar = Calendar.current
-        if calendar.isDateInToday(date) { return "Today, \(time)" }
-        if calendar.isDateInYesterday(date) { return "Yesterday, \(time)" }
-        let sameYear = calendar.isDate(date, equalTo: Date(), toGranularity: .year)
-        let day = date.formatted(sameYear ? .dateTime.month(.abbreviated).day() : .dateTime.month(.abbreviated).day().year())
-        return "\(day), \(time)"
     }
 
     /// The chosen device's name, or the system default's.

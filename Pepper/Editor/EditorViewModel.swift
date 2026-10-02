@@ -2125,6 +2125,16 @@ final class EditorViewModel {
         exportTask?.cancel()
     }
 
+    /// File-menu commands the view carries out: it owns the save panel
+    /// and the Orbis sheet. Cleared once taken.
+    enum MenuCommand { case export, sendToOrbis }
+    var pendingMenuCommand: MenuCommand?
+
+    /// Export and Send to Orbis can start (the toolbar buttons' rule).
+    var canStartExport: Bool {
+        !isExporting && !isLoading && loadError == nil && !(activeOrbisExport?.isActive ?? false)
+    }
+
     /// The Orbis sheet owns its controller's lifetime; this weak link
     /// just lets app-level quit handling find an in-flight upload.
     @ObservationIgnored weak var activeOrbisExport: OrbisExportController?

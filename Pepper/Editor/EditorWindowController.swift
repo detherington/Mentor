@@ -25,7 +25,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = project.displayName
+        // "Today, 12:59 PM" rather than the bundle's file name; also what
+        // the Window menu lists.
+        window.title = RecordingBundle.displayTitle(project.bundleURL)
         let host = NSHostingController(rootView: EditorView(viewModel: viewModel))
         // Lets EditorView's `.toolbar` (Export, Send to Orbis, details)
         // become this window's toolbar; an NSWindow hosting SwiftUI gets
@@ -74,6 +76,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     @objc func undoEditorChange(_ sender: Any?) { viewModel.performUndo() }
     @objc func redoEditorChange(_ sender: Any?) { viewModel.performRedo() }
+
+    // File › Export… and Send to Orbis…: the view owns the save panel and
+    // the Orbis sheet, so the command is handed to it.
+    @objc func exportVideo(_ sender: Any?) { viewModel.pendingMenuCommand = .export }
+    @objc func sendToOrbis(_ sender: Any?) { viewModel.pendingMenuCommand = .sendToOrbis }
 }
 
 extension EditorWindowController: NSMenuItemValidation {
@@ -87,6 +94,11 @@ extension EditorWindowController: NSMenuItemValidation {
             let name = viewModel.redoActionName
             item.title = viewModel.canRedo && !name.isEmpty ? "Redo \(name)" : "Redo"
             return viewModel.canRedo
+        case #selector(exportVideo(_:)):
+            return viewModel.canStartExport
+        case #selector(sendToOrbis(_:)):
+            // The toolbar only shows Send to Orbis when signed in.
+            return viewModel.canStartExport && OrbisAccount.shared.isConnected
         default:
             return true
         }
@@ -182,6 +194,14 @@ extension EditorWindowController {
             let outcome = vm.exportError.map { "FAILED: \($0.localizedDescription)" } ?? "OK"
             PepperDebug.log("DEBUG: export \(url.lastPathComponent) trim=\(CMTimeGetSeconds(vm.trimStart))..\(CMTimeGetSeconds(vm.trimEnd)) duration=\(CMTimeGetSeconds(vm.duration)) → \(outcome)")
             print("EXPORT \(outcome)")
+            // The export sheet as it ended (an error shows there).
+            RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+            if let sheetView = controller.window?.attachedSheet?.contentView?.superview,
+               let rep = sheetView.bitmapImageRepForCachingDisplay(in: sheetView.bounds) {
+                sheetView.cacheDisplay(in: sheetView.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?
+                    .write(to: dir.appendingPathComponent("editor-export-result.png"))
+            }
         }
         // Quick polish writes zooms and captions into the bundle, so
         // this pass is opt-in: point it at a copy.

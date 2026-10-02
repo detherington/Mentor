@@ -25,14 +25,15 @@ struct OrbisExportSheet: View {
     @State private var clients: [OrbisClientInfo] = []
     @State private var loadingClients: Bool = false
     @State private var clientsError: String?
+    @State private var linkCopied = false
 
     init(vm: EditorViewModel, onClose: @escaping () -> Void) {
         self.vm = vm
         self.onClose = onClose
-        let defaultTitle = vm.project.bundleURL.deletingPathExtension()
-            .lastPathComponent
-            .replacingOccurrences(of: "Pepper_", with: "")
-            .replacingOccurrences(of: "_", with: " ")
+        // "Recording, Oct 2, 2026 at 12:59 PM", not "2026-10-02 12-59-36".
+        let defaultTitle = RecordingBundle.recordedDate(vm.project.bundleURL)
+            .map { "Recording, \($0.formatted(date: .abbreviated, time: .shortened))" }
+            ?? vm.project.displayName
         _title           = State(initialValue: defaultTitle)
         _visibility      = State(initialValue: OrbisSettings.shared.lastVisibility)
         _selectedClientID = State(initialValue: OrbisSettings.shared.lastClientID)
@@ -48,8 +49,8 @@ struct OrbisExportSheet: View {
             switch controller.phase {
             case .finished(let videoID):
                 successView(videoID: videoID)
-            case .failed(let message):
-                failureView(message: message)
+            case .failed(let problem):
+                failureView(problem)
             default:
                 form
             }
@@ -177,13 +178,17 @@ struct OrbisExportSheet: View {
                     .font(.title)
                 VStack(alignment: .leading) {
                     Text("Upload complete").font(.headline)
-                    Text("Orbis is processing the video. It'll appear in the library shortly.")
+                    Text(linkCopied
+                         ? "The link is on your clipboard. Orbis is processing the video; it'll appear in the library shortly."
+                         : "Orbis is processing the video. It'll appear in the library shortly.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             HStack {
                 Spacer()
+                Button("Copy Link") { copyLink(videoID: videoID) }
                 Button("View in Orbis") {
                     if let url = OrbisSettings.shared.videoURL(videoID: videoID) {
                         NSWorkspace.shared.open(url)
@@ -195,23 +200,22 @@ struct OrbisExportSheet: View {
             }
         }
         .padding()
+        // Sharing is the usual next step, so the link is copied as the
+        // upload finishes, the way Loom does it.
+        .onAppear { copyLink(videoID: videoID) }
+    }
+
+    private func copyLink(videoID: String) {
+        guard let url = OrbisSettings.shared.videoURL(videoID: videoID) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        linkCopied = true
     }
 
     @ViewBuilder
-    private func failureView(message: String) -> some View {
+    private func failureView(_ problem: FriendlyError) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .font(.title)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Upload failed").font(.headline)
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            FriendlyErrorView(error: problem)
             HStack {
                 Spacer()
                 Button("Close") { onClose() }

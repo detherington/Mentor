@@ -22,7 +22,7 @@ its windows is open, via `DockPresence`). `LSUIElement` stays true so a
 hidden Dock icon never flashes at launch; the policy is set at startup.
 
 Single-maintainer project; ship cadence is "whenever a feature's ready."
-Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.2. The
+Version is `MARKETING_VERSION` in `project.yml` — currently 1.2.3. The
 build number (`CURRENT_PROJECT_VERSION`) is a UTC `YYYYMMDDHHMM`
 timestamp set by the release script.
 
@@ -167,7 +167,7 @@ the same time base the editor uses for seeking. Don't mix wall-clock
 | `Pepper/Editor/` | `RecordingProject`, `EditorComposition`, `LiveCompositor`, `OverlaySettings` (the one value both preview and export render from), `EditorViewModel`, `EditState` + `SidecarStore` (per-recording edits, debounced saves), keyframe models + `RampKeyframe` (shared zoom/talking-head editing rules), `SilenceAnalyzer`, `SourceCoordinateMapper`, `TrimMap`; `EditorView` (window toolbar: details, Send to Orbis, Export) with `Inspector/` (`EditorInspector`: plain-language feature rows with switches, one open at a time via `vm.openInspectorFeature`, plus Quick polish; timeline/preview clicks open the matching row), `Timeline/`, `ExportSheet` (+ the save panel's Quality accessory) |
 | `Pepper/Rendering/` | `FinalRenderer` (reader → compositor → writer), `ExportQuality`, `SRTFormatter` |
 | `Pepper/Orbis/` | "Export to Orbis": `OrbisAccount` (connection owner — OAuth 2.1 PKCE + loopback sign-in as client `pepper-mac`, scope `videos`, same flow as Muesli; refresh/revoke), `OAuthLoopbackServer`, `OrbisClient` (REST; asks `OrbisAccount` for a credential per request), `OrbisExportController` (FinalRenderer → presigned R2 PUT → ingest-assets), `OrbisExportSheet`, `OrbisKeychain` (refresh token keyed per host, never UserDefaults), `OrbisSettings` (host + last-used form values). No custom URL scheme — an old token-delivery link was a token-injection hole |
-| `Pepper/UI/` | `Home/` (main window: `HomeWindowController` — hides while a recording starts, back if it's cancelled — `HomeModel`, `HomeView`, in the setup/sign-in page look); SwiftUI/AppKit windows (Settings, Soundboard, SourcePicker, RegionSelector, Countdown, RecordingBorder, WebcamPreview, Teleprompter, VideoReadyNotice — Pepper's own card, not a system notification, so no permission prompt); `Onboarding/` (setup walkthrough, modelled on Muesli's); `Brand` (SBS tokens shared with Muesli: colorsets, cobalt `AccentColor` app-wide, Nantes font in `Resources/Fonts`, Neon/Quiet button styles, `brandCard`/`brandKicker`/`brandTimecode`). The editor follows Muesli's rules: native toolbar/forms/menus/sheets; ground strips (timeline, inspector) carrying surface cards; one Neon CTA (Quick polish); Persimmon = live/playhead, Violet = automatic (zooms), Emerald = you (full-screen moments), Teal = caption blocks. Recording indicators (the border, the menu-bar record icon) stay system red on purpose: red is universally "recording" |
+| `Pepper/UI/` | `Home/` (main window: `HomeWindowController` — hides while a recording starts, back if it's cancelled — `HomeModel`, `HomeView`, in the setup/sign-in page look; a recent recording's right-click menu opens, reveals or trashes it, never while it's rendering or exporting); `FriendlyError` (+ `FriendlyErrorView`); SwiftUI/AppKit windows (Settings, Soundboard, SourcePicker, RegionSelector, Countdown, RecordingBorder, WebcamPreview, Teleprompter, VideoReadyNotice — Pepper's own card, not a system notification, so no permission prompt); `Onboarding/` (setup walkthrough, modelled on Muesli's); `Brand` (SBS tokens shared with Muesli: colorsets, cobalt `AccentColor` app-wide, Nantes font in `Resources/Fonts`, Neon/Quiet button styles, `brandCard`/`brandKicker`/`brandTimecode`). The editor follows Muesli's rules: native toolbar/forms/menus/sheets; ground strips (timeline, inspector) carrying surface cards; one Neon CTA (Quick polish); Persimmon = live/playhead, Violet = automatic (zooms), Emerald = you (full-screen moments), Teal = caption blocks. Recording indicators (the border, the menu-bar record icon) stay system red on purpose: red is universally "recording" |
 | `Pepper/Hotkeys/` | `GlobalHotkey` — Carbon `RegisterEventHotKey` wrapper |
 | `Pepper/Settings/` | `Settings` — UserDefaults-backed singleton, posts `Settings.didChange` notification |
 
@@ -217,7 +217,8 @@ the same time base the editor uses for seeking. Don't mix wall-clock
   the main window (run the binary directly if `open -n` won't block on it;
   permissions then read as not granted). With the editor hook,
   `-pepper.debug.renderExportTo <file.mp4>` runs the editor's own export
-  (as Export and Send to Orbis do) and logs OK or the error;
+  (as Export and Send to Orbis do), logs OK or the error and writes the
+  export sheet as it ended (`editor-export-result.png`);
   `-pepper.debug.renderExportTrimInNs <ns>`, `-pepper.debug.renderExportCutNs
   <start,end>`, `-pepper.debug.renderExportTrimIn <s>` and
   `-pepper.debug.renderExportCleanAudio YES` set up the edit first.
@@ -231,7 +232,7 @@ reason.
 
 `LSUIElement: true`, and menu-bar only when the Dock icon is hidden. That means:
 - **No main menu bar** unless we install one manually —
-  `MainMenu.build()` handles Cmd+Cut/Copy/Paste/Quit/Hide, Settings (⌘,),
+  `MainMenu.build()` handles Cmd+Cut/Copy/Paste/Quit/Hide, Check for Updates, Settings (⌘,),
   Open Recording (⌘O) and editor Undo/Redo (their own actions, not
   `undo:`) so standard keyboard shortcuts work when an editor window is
   focused.
@@ -305,6 +306,9 @@ reads the previous feed and old zips (for deltas) from it.
   nanoseconds; mixed with 600ths, a range's end can round past the last
   frame and the reader rejects the video composition (AVError -11841).
   `FinalRenderer` snaps the `TrimMap` first (`snappedForRendering`).
+- **Errors people see go through `FriendlyError`**: a plain title and
+  what to do, with the technical text behind Copy Details. Don't show an
+  AVFoundation or HTTP error's `localizedDescription` directly.
 - `AVAudioFile` can't encode AAC directly from non-interleaved float
   mixer taps. Soundboard records to a temp `.caf` and transcodes to
   AAC on stop.

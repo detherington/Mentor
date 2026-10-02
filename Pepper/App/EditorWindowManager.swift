@@ -21,7 +21,21 @@ final class EditorWindowManager {
 
     /// An editor has this recording open.
     func isOpen(_ url: URL) -> Bool {
-        windows.contains { $0.project.bundleURL.standardizedFileURL == url.standardizedFileURL }
+        editor(for: url) != nil
+    }
+
+    /// This recording's editor is exporting or uploading it.
+    func isExporting(_ url: URL) -> Bool {
+        editor(for: url)?.viewModel.hasActiveExport ?? false
+    }
+
+    /// Close this recording's editor, if open (its edits are saved first).
+    func close(_ url: URL) {
+        editor(for: url)?.close()
+    }
+
+    private func editor(for url: URL) -> EditorWindowController? {
+        windows.first { $0.project.bundleURL.standardizedFileURL == url.standardizedFileURL }
     }
 
     /// Editors left open at quit never get `windowWillClose`.
@@ -36,7 +50,7 @@ final class EditorWindowManager {
         }
 
         // If already open, bring that window to front instead of duplicating.
-        if let existing = windows.first(where: { $0.project.bundleURL.standardizedFileURL == url.standardizedFileURL }) {
+        if let existing = editor(for: url) {
             existing.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return

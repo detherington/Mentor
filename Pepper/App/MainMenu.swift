@@ -6,11 +6,11 @@ import AppKit
 /// through when an editor window is key. The menu shows at the top of the
 /// screen whenever one of our windows is focused.
 ///
-/// Settings (⌘,) and Open Recording (⌘O) go to `AppDelegate`; Undo and
-/// Redo to the key editor (`EditorWindowController`), with `AppDelegate`
-/// disabling them when no editor is key. They use their own actions, not
-/// `undo:`/`redo:`, so they drive the editor's undo stack rather than a
-/// focused text field's.
+/// Check for Updates, Settings (⌘,) and Open Recording (⌘O) go to
+/// `AppDelegate`; Export (⌘E), Send to Orbis (⇧⌘E), Undo and Redo to the
+/// key editor (`EditorWindowController`), with `AppDelegate` disabling
+/// them when no editor is key. They use their own actions, not `undo:`/`redo:`, so
+/// they drive the editor's undo stack rather than a focused text field's.
 @MainActor
 enum MainMenu {
     static func build() -> NSMenu {
@@ -25,6 +25,9 @@ enum MainMenu {
 
         appMenu.addItem(withTitle: "About Pepper",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(withTitle: "Check for Updates…",
+                        action: #selector(AppDelegate.checkForUpdates(_:)),
                         keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Settings…",
@@ -54,6 +57,16 @@ enum MainMenu {
         fileMenu.addItem(withTitle: "Open Recording…",
                          action: #selector(AppDelegate.showOpenRecordingPanel(_:)),
                          keyEquivalent: "o")
+        fileMenu.addItem(.separator())
+        // The editor's two toolbar buttons, with shortcuts.
+        fileMenu.addItem(withTitle: "Export…",
+                         action: #selector(EditorWindowController.exportVideo(_:)),
+                         keyEquivalent: "e")
+        let sendToOrbis = NSMenuItem(title: "Send to Orbis…",
+                                     action: #selector(EditorWindowController.sendToOrbis(_:)),
+                                     keyEquivalent: "e")
+        sendToOrbis.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(sendToOrbis)
 
         // Edit menu — text-field clipboard actions via the responder
         // chain (NSText handles these natively for any focused NSTextView

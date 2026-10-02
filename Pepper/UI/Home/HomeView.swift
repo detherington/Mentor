@@ -149,8 +149,11 @@ struct HomeView: View {
                         RecentTile(
                             title: recent.title,
                             thumbnail: model.thumbnails[recent.url],
-                            duration: model.durations[recent.url]
-                        ) { actions.open(recent.url) }
+                            duration: model.durations[recent.url],
+                            open: { actions.open(recent.url) },
+                            reveal: { actions.reveal(recent.url) },
+                            trash: { actions.trash(recent.url) }
+                        )
                     }
                     // Keep tiles the same width when there are fewer than four.
                     ForEach(model.recents.count..<HomeModel.recentCount, id: \.self) { _ in
@@ -209,6 +212,8 @@ private struct RecentTile: View {
     let thumbnail: NSImage?
     let duration: String?
     let open: () -> Void
+    let reveal: () -> Void
+    let trash: () -> Void
     @State private var isHovering = false
 
     var body: some View {
@@ -257,6 +262,14 @@ private struct RecentTile: View {
         .frame(maxWidth: .infinity)
         .onHover { isHovering = $0 }
         .help("Open in the editor")
+        // Deleting a recording used to mean finding its two files in
+        // Finder.
+        .contextMenu {
+            Button("Open in Editor", action: open)
+            Button("Show in Finder", action: reveal)
+            Divider()
+            Button("Move to Trash…", role: .destructive, action: trash)
+        }
         .accessibilityLabel("Open the recording from \(title)\(duration.map { ", \($0) long" } ?? "")")
     }
 }

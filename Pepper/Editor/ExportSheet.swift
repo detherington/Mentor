@@ -51,20 +51,7 @@ struct ExportSheet: View {
 
     @ViewBuilder
     private func errorContent(err: any Error) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.title)
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(errorTitle(for: err))
-                    .font(.headline)
-                Text(err.localizedDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
-        }
+        FriendlyErrorView(error: FriendlyError(err))
         HStack {
             Spacer()
             Button("Close") {
@@ -72,13 +59,6 @@ struct ExportSheet: View {
             }
             .keyboardShortcut(.defaultAction)
         }
-    }
-
-    private func errorTitle(for err: any Error) -> String {
-        if case FinalRenderer.RenderError.cancelled = err {
-            return "Export cancelled"
-        }
-        return "Export failed"
     }
 }
 
